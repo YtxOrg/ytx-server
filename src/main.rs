@@ -1,185 +1,123 @@
-use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
-use sqlx::postgres::PgPoolOptions;
-use std::{collections::HashMap, sync::Arc};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::RwLock;
-use tokio_tungstenite::tungstenite::Message;
+mod constant;
+mod dbhub;
+mod message;
+mod utils;
+mod websocket;
 
-#[derive(Debug, Serialize, Deserialize)]
-struct LoginInfo {
-    user: String,
-    password: String,
-    database: String,
-}
+use crate::constant::YTX_SECRET_PATH;
+use crate::dbhub::*;
+use crate::utils::*;
 
-// 数据库连接池管理器
-struct DatabaseManager {
-    pools: RwLock<HashMap<String, Arc<sqlx::PgPool>>>,
-}
+use anyhow::{Context, Result};
+use dotenvy::dotenv;
+use std::{env::var, sync::Arc};
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
+use tracing::info;
 
-impl DatabaseManager {
-    fn new() -> Self {
-        Self {
-            pools: RwLock::new(HashMap::new()),
-        }
-    }
-
-    async fn get_pool(
-        &self,
-        database: &str,
-        user: &str,
-        password: &str,
-    ) -> Result<Arc<sqlx::PgPool>, String> {
-        // 先检查是否已有连接池
-        {
-            let pools = self.pools.read().await;
-            if let Some(pool) = pools.get(database) {
-                return Ok(pool.clone());
-            }
-        }
-
-        // 创建新的连接池
-        let database_url = format!(
-            "postgres://{}:{}@localhost:5432/{}",
-            user, password, database
-        );
-        let pool = PgPoolOptions::new()
-            .max_connections(5)
-            .connect(&database_url)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let pool = Arc::new(pool);
-
-        // 存储到集合中
-        {
-            let mut pools = self.pools.write().await;
-            pools.insert(database.to_string(), pool.clone());
-        }
-
-        Ok(pool)
-    }
-}
+use websocket::WebSocket;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 创建数据库管理器
-    let db_manager = Arc::new(DatabaseManager::new());
+async fn main() -> Result<()> {
+    // Load environment variables
+    dotenv().ok();
 
-    let addr = "127.0.0.1:8080";
-    let listener = TcpListener::bind(addr).await?;
-    println!("WebSocket server listening on: {}", addr);
+    let rust_log = var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
 
-    while let Ok((stream, _)) = listener.accept().await {
-        let db_manager = db_manager.clone();
-        tokio::spawn(handle_connection(stream, db_manager));
+    let _guard = init_tracing(&rust_log);
+
+    // Read data from .env file
+    let base_postgres_url =
+        var("BASE_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhost:5432".to_string());
+    let vault_addr = var("VAULT_ADDR").unwrap_or_else(|_| "http://127.0.0.1:8200".to_string());
+    let vault_token = var("VAULT_TOKEN").ok().filter(|t| !t.is_empty());
+    let listen_addr = var("LISTEN_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
+
+    let auth_db = read_value_with_default("AUTH_DB", "ytx_auth")?;
+    let auth_readwrite_role = read_value_with_default("AUTH_READWRITE_ROLE", "ytx_auth_readwrite")?;
+
+    let mut auth_readwrite_password = var("AUTH_READWRITE_PASSWORD").unwrap_or_default();
+
+    if let Some(token) = &vault_token {
+        let vault_addr_clone = vault_addr.clone();
+        let token_clone = token.clone();
+
+        tokio::spawn(async move {
+            let _ = periodic_renewal(vault_addr_clone, token_clone).await;
+        });
+
+        let ytx_data = read_vault_data(&vault_addr, &token, YTX_SECRET_PATH)
+            .await
+            .context("Failed to read YTX role passwords from Vault")?;
+
+        auth_readwrite_password = get_vault_password(&ytx_data, &auth_readwrite_role)?;
     }
 
-    Ok(())
-}
+    let auth_url = build_url(
+        &base_postgres_url,
+        &auth_readwrite_role,
+        &auth_readwrite_password,
+        &auth_db,
+    )?;
+    let auth_pool = create_pool(&auth_url).await?;
 
-async fn handle_connection(stream: TcpStream, db_manager: Arc<DatabaseManager>) {
-    let ws_stream = tokio_tungstenite::accept_async(stream)
+    sqlx::query("SELECT 1")
+        .execute(&auth_pool)
         .await
-        .expect("Error during WebSocket handshake");
+        .context("Failed to connect to auth DB")?;
 
-    let (mut write, mut read) = ws_stream.split();
+    info!("Connected to auth DB successfully.");
 
-    // 处理接收到的消息
-    while let Some(msg) = read.next().await {
-        match msg {
-            Ok(Message::Text(text)) => {
-                // 尝试解析登录信息
-                match serde_json::from_str::<LoginInfo>(&text) {
-                    Ok(login_info) => {
-                        // 获取或创建数据库连接池
-                        match db_manager
-                            .get_pool(&login_info.database, &login_info.user, &login_info.password)
-                            .await
-                        {
-                            Ok(pool) => {
-                                // 验证用户名和密码
-                                match verify_user(&pool, &login_info).await {
-                                    Ok(_) => {
-                                        let response = serde_json::json!({
-                                            "status": "success",
-                                            "message": "Login successful"
-                                        });
+    let db_hub = Arc::new(DbHub::new(
+        base_postgres_url,
+        vault_addr,
+        vault_token,
+        auth_pool,
+    ));
 
-                                        if let Err(_) =
-                                            write.send(Message::Text(response.to_string())).await
-                                        {
-                                            break;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        let response = serde_json::json!({
-                                            "status": "error",
-                                            "message": format!("Login failed: {}", e)
-                                        });
+    let sql_factory = Arc::new(SqlFactory::new());
 
-                                        if let Err(_) =
-                                            write.send(Message::Text(response.to_string())).await
-                                        {
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                let response = serde_json::json!({
-                                    "status": "error",
-                                    "message": format!("Database connection failed: {}", e)
-                                });
-
-                                if let Err(_) =
-                                    write.send(Message::Text(response.to_string())).await
-                                {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        let response = serde_json::json!({
-                            "status": "error",
-                            "message": "Invalid login format"
-                        });
-
-                        if let Err(_) = write.send(Message::Text(response.to_string())).await {
-                            break;
-                        }
-                    }
-                }
+    {
+        let hub = Arc::clone(&db_hub);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
+            loop {
+                interval.tick().await;
+                hub.cleanup_idle_resource(86400).await;
             }
-            Ok(Message::Close(_)) => {
-                break;
-            }
-            Err(_) => {
-                break;
-            }
-            _ => {}
-        }
+        });
     }
-}
 
-async fn verify_user(pool: &sqlx::PgPool, login_info: &LoginInfo) -> Result<(), String> {
-    // TODO: 实现实际的用户验证逻辑
-    // 这里应该查询数据库验证用户名和密码
-    // 示例：
-    // let user = sqlx::query!(
-    //     "SELECT * FROM users WHERE username = $1 AND password = $2",
-    //     login_info.user,
-    //     login_info.password
-    // )
-    // .fetch_optional(pool)
-    // .await
-    // .map_err(|e| e.to_string())?;
+    let listener = TcpListener::bind(listen_addr.clone()).await?;
 
-    // if user.is_none() {
-    //     return Err("Invalid username or password".to_string());
-    // }
+    while let Ok((mut stream, _)) = listener.accept().await {
+        let db_hub = db_hub.clone();
+        let sql_factory = sql_factory.clone();
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            let n = match stream.peek(&mut buf).await {
+                Ok(n) => n,
+                Err(_) => return,
+            };
+
+            let request = String::from_utf8_lossy(&buf[..n]);
+
+            if request.starts_with("GET / ") || request.starts_with("GET / HTTP/") {
+                if request.to_ascii_lowercase().contains("upgrade: websocket") {
+                    info!("Incoming WebSocket handshake, upgrading connection.");
+                    WebSocket::new(stream, db_hub, sql_factory).handle().await;
+                } else {
+                    info!("Incoming HTTP request, responding with 200 OK.");
+
+                    let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
+                    let _ = stream.write_all(response).await;
+                    let _ = stream.flush().await;
+                }
+                return;
+            }
+        });
+    }
 
     Ok(())
 }

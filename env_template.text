@@ -1,0 +1,29 @@
+VAULT_TOKEN=
+
+RUST_LOG=error,warn,info
+
+BASE_POSTGRES_URL=postgres://localhost:5432
+VAULT_ADDR="http://127.0.0.1:8200"
+LISTEN_ADDR=127.0.0.1:8080
+
+# -----------------------------------------
+# Authentication Database
+# -----------------------------------------
+AUTH_DB=ytx_auth                      # Database storing YTX role and workspace info
+# Note: must match the database created by ytx-initdb
+
+# -----------------------------------------
+# PostgreSQL roles (can be customized, must match initdb)
+# -----------------------------------------
+AUTH_READWRITE_ROLE=ytx_auth_readwrite
+MAIN_READWRITE_ROLE=ytx_main_readwrite          # default role assigned when a new user registers
+MAIN_READONLY_ROLE=ytx_main_readonly
+# Note: if customized, must match roles created by ytx-initdb
+
+# -----------------------------------------
+# Role passwords (can be overridden by Vault)
+# -----------------------------------------
+AUTH_READWRITE_PASSWORD=                         # Password for AUTH_READWRITE_ROLE (used if Vault token is empty)
+MAIN_READWRITE_PASSWORD=                         # Password for MAIN_READONLY_ROLE (used if Vault token is empty)
+MAIN_READONLY_PASSWORD=                          # Password for MAIN_READWRITE_ROLE (used if Vault token is empty)
+# Note: Vault passwords override these values if token is provided
