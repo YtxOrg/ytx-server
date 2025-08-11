@@ -33,16 +33,21 @@ pub fn read_value_with_default(key: &str, default: &str) -> Result<String> {
     Ok(val)
 }
 
-pub fn build_base_url(base_url: &str, user: &str, password: &str) -> Result<String> {
+pub fn build_postgres_url(
+    base_url: &str,
+    user: &str,
+    password: &str,
+    database_name: &str,
+) -> Result<String> {
     let mut url = Url::parse(base_url)?;
+
     url.set_username(user)
         .map_err(|()| anyhow::anyhow!("Invalid username"))?;
+
     url.set_password(Some(password))
         .map_err(|()| anyhow::anyhow!("Invalid password"))?;
-    Ok(url.into())
-}
 
-pub fn with_database_name(mut url: Url, database_name: &str) -> Url {
     url.set_path(database_name);
-    url
+
+    Ok(url.into())
 }

@@ -29,8 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         var("BASE_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhost:5432".to_string());
     let vault_addr = var("VAULT_ADDR").unwrap_or_else(|_| "http://127.0.0.1:8200".to_string());
     let vault_token = var("VAULT_TOKEN").ok().filter(|t| !t.is_empty());
-
-    let port = var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let listen_addr = var("LISTEN_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
 
     let admin_user = read_value_with_default("ADMIN_USER", "ytx_admin")?;
     let mut admin_password = var("ADMIN_PASSWORD").unwrap_or_default();
@@ -83,13 +82,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    let addr = format!("127.0.0.1:{}", port);
-    let listener = TcpListener::bind(addr.clone()).await?;
+    let listener = TcpListener::bind(listen_addr.clone()).await?;
 
     println!(
         "[{}] WebSocket: Start listening on: {}",
         Local::now().format("%Y-%m-%d %H:%M:%S"),
-        addr
+        listen_addr
     );
 
     while let Ok((stream, _)) = listener.accept().await {
