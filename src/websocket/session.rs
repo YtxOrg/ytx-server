@@ -4,15 +4,16 @@ use crate::dbhub::*;
 use crate::message::*;
 use crate::websocket::websocket::{send_private_message, send_public_message};
 
-use futures::future::join_all;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use chrono::{DateTime, Local, Utc};
+use futures::future::join_all;
 use futures_util::{
     SinkExt, StreamExt,
     stream::{SplitSink, SplitStream},
 };
+use rust_decimal::Decimal;
+use serde_json::{Map, Number, Value, from_value, json};
 use sqlx::{
     Column, Connection, Executor, PgConnection, PgPool, Postgres, Row, TypeInfo,
     postgres::{PgArguments, PgRow},
@@ -26,10 +27,6 @@ use tokio::{
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 use urlencoding::encode;
 use uuid::Uuid;
-
-use rust_decimal::Decimal;
-use serde_json::{Map, Number, Value, from_value, json};
-use std::str::FromStr;
 
 pub struct Session {
     ws_writer: Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>,
@@ -181,10 +178,10 @@ impl Session {
             from_value(msg.value.clone()).map_err(|e| format!("Failed to parse LoginInfo: {e}"))?;
 
         let user = &value.user;
-        println!("Login info: {}@{}", user, value.database);
+        println!("Login info: {}@{}", user, value.workspace);
 
         // Build connection string and test connection
-        let conn_str = build_pg_url(user, &value.password, &value.database);
+        let conn_str = build_pg_url(user, &value.password, &value.workspace);
         let mut temp_conn = match PgConnection::connect(&conn_str).await {
             Ok(conn) => conn,
             Err(e) => {
@@ -196,12 +193,6 @@ impl Session {
                 return Ok(());
             }
         };
-
-        // Check if database is empty, initialize if needed
-        if is_database_empty(&mut temp_conn).await? {
-            self.handle_initialize_database(&mut temp_conn, user)
-                .await?;
-        }
 
         // Check if database is YTX managed
         let managed = is_ytx_managed(&mut temp_conn).await.unwrap_or(false);
@@ -217,13 +208,13 @@ impl Session {
         // Initialize connection pool
         let pool = self
             .dbhub
-            .init_pool(&conn_str, value.database.clone(), role.clone())
+            .init_pool(&conn_str, value.workspace.clone(), role.clone())
             .await
             .map_err(|e| format!("DbHub init_pool error: {e}"))?;
 
         self.pgpool = Some(pool.clone());
 
-        self.start_broadcast(value.database, role).await?;
+        self.start_broadcast(value.workspace, role).await?;
         self.push_global_config().await?;
 
         // Send login success message with session ID
@@ -237,58 +228,6 @@ impl Session {
         .await?;
 
         self.push_tree().await?;
-        Ok(())
-    }
-
-    async fn handle_initialize_database(
-        &mut self,
-        conn: &mut PgConnection,
-        user: &str,
-    ) -> Result<(), String> {
-        if self.user_id.is_some() {
-            return Err("Database already initialized.".to_string());
-        }
-
-        let mut sqls = Vec::new();
-
-        sqls.extend([
-            ytx_user_table(),
-            ytx_meta_table(),
-            global_config(),
-            f_node_table(),
-            s_node_table(),
-            i_node_table(),
-            t_node_table(),
-            f_entry_table(),
-            s_entry_table(),
-            t_entry_table(),
-            i_entry_table(),
-        ]);
-
-        let user_id = Uuid::now_v7();
-
-        for section in SECTIONS {
-            sqls.push(path_table(section));
-            sqls.push(insert_global_config(section, user_id));
-        }
-
-        for section in [SALE, PURCHASE] {
-            sqls.push(o_node_table(section));
-            sqls.push(o_entry_table(section));
-            sqls.push(o_settlement_table(section));
-        }
-
-        sqls.extend([insert_user(user, user_id), insert_meta()]);
-
-        let result = execute_multi(conn, move |_| Box::pin(async move { Ok(sqls) })).await;
-
-        if let Err(err) = &result {
-            eprintln!("Initialize database failed: {}", err);
-        } else {
-            println!("Initialize database successfully");
-            self.user_id = Some(user_id);
-        }
-
         Ok(())
     }
 }

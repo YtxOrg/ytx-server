@@ -1,0 +1,14 @@
+YTX_READONLY_TOKEN=
+
+POSTGRES_URL=postgres://postgres@localhost:5432/postgres
+VAULT_ADDR="http://127.0.0.1:8200"
+
+ADMIN_USER=ytx_admin
+READONLY_USER=ytx_readonly
+READWRITE_USER=ytx_readwrite
+
+ADMIN_PASSWORD=
+READONLY_PASSWORD=
+READWRITE_PASSWORD=
+
+PORT=8080

@@ -85,7 +85,7 @@ message_struct! {
     pub struct LoginInfo {
         pub user: String,
         pub password: String,
-        pub database: String,
+        pub workspace: String,
     }
 }
 

@@ -42,3 +42,5 @@ pub const STATUS: &str = "status";
 pub const NODE_ID: &str = "node_id";
 pub const ENTRY_ID: &str = "entry_id";
 pub const SUPPORT_ID: &str = "support_id";
+
+pub const YTX_SECRET_PATH: &str = "secret/data/postgres/ytx";

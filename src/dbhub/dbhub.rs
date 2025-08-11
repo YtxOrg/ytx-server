@@ -1,5 +1,5 @@
-use sqlx::postgres::{PgPool, PgPoolOptions, Postgres};
-use sqlx::{Connection, Error, PgConnection, Transaction};
+use sqlx::PgConnection;
+use sqlx::postgres::{PgPool, PgPoolOptions};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, broadcast};
@@ -7,13 +7,21 @@ use uuid::Uuid;
 
 // 数据库连接池管理器
 pub struct DbHub {
+    pub base_postgres_url: String,
+    pub vault_addr: String,
+    pub vault_token: Option<String>,
+    pub role_passwords: Mutex<HashMap<String, String>>,
     pools: Mutex<HashMap<(String, String), (PgPool, Instant)>>,
     pub senders: Mutex<HashMap<(String, String), (broadcast::Sender<String>, Instant)>>,
 }
 
 impl DbHub {
-    pub fn new() -> Self {
+    pub fn new(base_postgres_url: String, vault_addr: String, vault_token: Option<String>) -> Self {
         Self {
+            base_postgres_url,
+            vault_addr,
+            vault_token,
+            role_passwords: Mutex::new(HashMap::new()),
             pools: Mutex::new(HashMap::new()),
             senders: Mutex::new(HashMap::new()),
         }
@@ -21,7 +29,7 @@ impl DbHub {
 
     pub async fn init_pool(
         &self,
-        conn_str: &str,
+        db_url: &str,
         database: String,
         role: String,
     ) -> Result<PgPool, String> {
@@ -35,36 +43,12 @@ impl DbHub {
             return Ok(pool.clone());
         }
 
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .min_connections(2)
-            .acquire_timeout(Duration::from_secs(10))
-            .idle_timeout(Duration::from_secs(300))
-            .max_lifetime(Duration::from_secs(3600))
-            .test_before_acquire(true)
-            .connect(conn_str)
-            .await
-            .map_err(|e| format!("Failed to create connection pool: {:?} {}", key, e))?;
+        let pool = create_pool(&db_url).await?;
 
         println!("New connection pool: {:?}", key);
         pools.insert(key, (pool.clone(), now));
         Ok(pool)
     }
-
-    /*
-    pub async fn get_pool(&self, database: String, role: String) -> Result<PgPool, String> {
-        let mut pools = self.pools.lock().await;
-        let key = (database, role);
-        let now = Instant::now();
-
-        if let Some((pool, last_used)) = pools.get_mut(&key) {
-            *last_used = now;
-            Ok(pool.clone())
-        } else {
-            Err(format!("No connection found for database: {:?}", key))
-        }
-    }
-    */
 
     pub async fn cleanup_idle_resource(&self, timeout_secs: u64) {
         let now = Instant::now();
@@ -88,16 +72,6 @@ impl DbHub {
         });
     }
 
-    /*
-    pub async fn get_receiver(&self, database: String) -> broadcast::Receiver<String> {
-        let mut senders = self.senders.lock().await;
-        let sender = senders
-            .entry(database)
-            .or_insert_with(|| broadcast::channel(100).0);
-        sender.subscribe()
-    }
-    */
-
     pub async fn get_sender(&self, database: String, role: String) -> broadcast::Sender<String> {
         let mut senders = self.senders.lock().await;
         let key = (database, role);
@@ -115,38 +89,6 @@ impl DbHub {
         senders.insert(key, (sender.clone(), now));
         sender
     }
-}
-
-pub async fn execute_multi<F, Fut>(conn: &mut PgConnection, f: F) -> Result<(), String>
-where
-    F: FnOnce(&mut Transaction<'_, Postgres>) -> Fut,
-    Fut: std::future::Future<Output = Result<Vec<String>, Error>>,
-{
-    let mut tx = conn
-        .begin()
-        .await
-        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
-
-    let sqls = match f(&mut tx).await {
-        Ok(sqls) => sqls,
-        Err(e) => {
-            let _ = tx.rollback().await;
-            return Err(format!("Failed to get SQL list: {e}"));
-        }
-    };
-
-    for sql in sqls {
-        if let Err(e) = sqlx::query(&sql).execute(&mut *tx).await {
-            let _ = tx.rollback().await;
-            return Err(format!("Failed to execute SQL `{sql}`: {e}"));
-        }
-    }
-
-    if let Err(e) = tx.commit().await {
-        return Err(format!("Failed to commit transaction: {e}"));
-    }
-
-    Ok(())
 }
 
 pub async fn is_ytx_managed(conn: &mut PgConnection) -> Result<bool, String> {
@@ -211,4 +153,17 @@ pub async fn get_user_id(conn: &mut PgConnection, username: &str) -> Result<Uuid
         Ok(None) => Err(format!("User '{}' not found or invalid", username)),
         Err(e) => Err(format!("Failed to fetch user_id: {e}")),
     }
+}
+
+pub async fn create_pool(db_url: &str) -> Result<PgPool, String> {
+    PgPoolOptions::new()
+        .max_connections(4)
+        .min_connections(2)
+        .acquire_timeout(Duration::from_secs(10))
+        .idle_timeout(Duration::from_secs(300))
+        .max_lifetime(Duration::from_secs(3600))
+        .test_before_acquire(true)
+        .connect(db_url)
+        .await
+        .map_err(|e| format!("Failed to create pool for {}: {}", db_url, e))
 }
