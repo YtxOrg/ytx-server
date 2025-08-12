@@ -5,19 +5,18 @@ mod message;
 mod vault;
 mod websocket;
 
+use anyhow::{Context, Result};
 use chrono::Local;
 use dotenvy::dotenv;
 use std::{env::var, sync::Arc};
 use tokio::net::TcpListener;
+use websocket::WebSocket;
 
 use crate::config::*;
 use crate::constant::YTX_SECRET_PATH;
+use crate::dbhub::sql_factory::SqlFactory;
 use crate::dbhub::{DbHub, build_url, create_pool};
 use crate::vault::*;
-use anyhow::{Context, Result};
-use websocket::WebSocket;
-
-use crate::dbhub::sql_factory::SqlFactory;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,9 +31,9 @@ async fn main() -> Result<()> {
     let listen_addr = var("LISTEN_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
 
     let auth_db = read_value_with_default("AUTH_DB", "ytx_auth")?;
+    let auth_readwrite_role = read_value_with_default("AUTH_READWRITE_ROLE", "ytx_auth_readwrite")?;
 
-    let readwrite_user = read_value_with_default("READWRITE_USER", "ytx_readwrite")?;
-    let mut readwrite_password = var("READWRITE_PASSWORD").unwrap_or_default();
+    let mut auth_readwrite_password = var("AUTH_READWRITE_PASSWORD").unwrap_or_default();
 
     if let Some(token) = &vault_token {
         renew_vault_token(&vault_addr, token).await?;
@@ -43,7 +42,7 @@ async fn main() -> Result<()> {
             .await
             .context("Failed to read YTX role passwords from Vault")?;
 
-        readwrite_password = get_vault_password(&ytx_data, &readwrite_user)?;
+        auth_readwrite_password = get_vault_password(&ytx_data, &auth_readwrite_role)?;
 
         let vault_addr_clone = vault_addr.clone();
         let token_clone = token.clone();
@@ -54,11 +53,10 @@ async fn main() -> Result<()> {
 
     let auth_url = build_url(
         &base_postgres_url,
-        &readwrite_user,
-        &readwrite_password,
+        &auth_readwrite_role,
+        &auth_readwrite_password,
         &auth_db,
     )?;
-
     let auth_pool = create_pool(&auth_url).await?;
 
     sqlx::query("SELECT 1")

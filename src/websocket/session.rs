@@ -2,14 +2,15 @@ use crate::constant::*;
 use crate::dbhub::sql_factory::SqlFactory;
 use crate::dbhub::*;
 use crate::message::*;
+use crate::read_value_with_default;
 use crate::websocket::websocket::{send_private_message, send_public_message};
 
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 
-use anyhow::Context;
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use chrono::{DateTime, Local, Utc};
+use dotenvy::dotenv;
 use futures::future::join_all;
 use futures_util::{
     SinkExt, StreamExt,
@@ -75,7 +76,7 @@ impl Session {
                 Ok(()) => {}
                 Err(e) => {
                     eprintln!(
-                        "[{}] Session run Err: {}",
+                        "[{}] Error: {:?}",
                         Local::now().format("%Y-%m-%d %H:%M:%S"),
                         e
                     );
@@ -100,13 +101,7 @@ impl Session {
         let text = match msg {
             Ok(Message::Text(text)) => text,
             Ok(_) => return Ok(()),
-            Err(e) => {
-                return Err(anyhow!(
-                    "[{}] Session handle_message Err: {}",
-                    Local::now().format("%Y-%m-%d %H:%M:%S"),
-                    e
-                ));
-            }
+            Err(e) => return Err(anyhow!("WebSocket read error: {}", e)),
         };
 
         let msg: Msg = serde_json::from_str(&text)?;
@@ -118,10 +113,7 @@ impl Session {
         }
 
         if self.user_id.is_none() {
-            return Err(anyhow!(
-                "[{}] Session handle_message Err: User not logged in",
-                Local::now().format("%Y-%m-%d %H:%M:%S")
-            ));
+            return Ok(());
         }
 
         match msg.msg_type {
@@ -178,7 +170,8 @@ impl Session {
 
 impl Session {
     async fn handle_register(&mut self, msg: &Msg) -> Result<()> {
-        let value: RegisterInfo = from_value(msg.value.clone())?;
+        let value: RegisterInfo =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse RegisterInfo")?;
 
         let email = &value.email;
         let password = &value.password;
@@ -224,6 +217,11 @@ impl Session {
         .execute(auth_pool)
         .await?;
 
+        println!(
+            "[{}] User registration successful",
+            Local::now().format("%Y-%m-%d %H:%M:%S")
+        );
+
         Ok(())
     }
 
@@ -234,13 +232,12 @@ impl Session {
         }
 
         // Parse login information
-        let value: LoginInfo = from_value(msg.value.clone())?;
+        let value: LoginInfo =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse LoginInfo")?;
 
         let email = &value.email;
         let workspace = &value.workspace;
         let password = &value.password;
-
-        println!("Login info: {}@{}", email, workspace);
 
         let auth_pool = &self.dbhub.auth_pool;
 
@@ -262,18 +259,18 @@ impl Session {
                 .map_err(|e| anyhow!("Password verification failed: {}", e))?;
 
             self.user_id = Some(id);
-            println!("User {} logged in successfully", email);
+            println!("Email {} logged in successfully", email);
         } else {
-            return Err(anyhow!("User not found or inactive"));
+            return Err(anyhow!("Email not found or inactive"));
         }
 
         let user_id = self.user_id.ok_or_else(|| anyhow!("User ID not set"))?;
 
         let row = sqlx::query(
             r#"
-                SELECT user_role
-                FROM ytx_user_workspace
-                WHERE user_id = $1 AND workspace_name = $2 AND is_valid = TRUE
+                SELECT role
+                FROM ytx_role_workspace
+                WHERE user_id = $1 AND workspace = $2 AND is_valid = TRUE
                 "#,
         )
         .bind(user_id)
@@ -281,8 +278,9 @@ impl Session {
         .fetch_optional(auth_pool)
         .await?;
 
-        let user_role: String = if let Some(row) = row {
-            row.try_get("user_role")?
+        let role: String = if let Some(row) = row {
+            row.try_get("role")
+                .with_context(|| format!("Failed to get 'role' from workspace row"))?
         } else {
             self.apply_workspace_permission(user_id, workspace).await?;
             return Err(anyhow!("Workspace access pending approval"));
@@ -290,41 +288,39 @@ impl Session {
 
         let row = sqlx::query(
             r#"
-                SELECT database_name
+                SELECT database
                 FROM ytx_workspace_database
-                WHERE workspace_name = $1 AND is_valid = TRUE
+                WHERE workspace = $1 AND is_valid = TRUE
          "#,
         )
         .bind(workspace)
         .fetch_optional(auth_pool)
         .await?;
 
-        let database_name: String = if let Some(row) = row {
-            row.try_get("database_name")?
+        let database: String = if let Some(row) = row {
+            row.try_get("database")
+                .with_context(|| format!("Failed to get 'database' from workspace row"))?
         } else {
             return Err(anyhow!("Workspace database not found or inactive"));
         };
 
-        let role_password: String = self.dbhub.get_role_password(&user_role).await?;
+        let role_password: String = self.dbhub.get_role_password(&role).await?;
 
-        let main_url = build_url(
+        let role_url = build_url(
             &self.dbhub.base_postgres_url,
-            &user_role,
+            &role,
             &role_password,
-            &database_name,
+            &database,
         )?;
 
         // send_private_message(self.ws_writer.clone(), MsgType::LoginFailed, json!({})).await?;
 
         // Initialize connection pool
-        let pool = self
-            .dbhub
-            .init_pool(&main_url, &database_name, &user_role)
-            .await?;
+        let pool = self.dbhub.init_pool(&role_url, &database, &role).await?;
 
         self.pgpool = Some(pool.clone());
 
-        self.start_broadcast(&value.workspace, &user_role).await?;
+        self.start_broadcast(&database, &role).await?;
         self.push_global_config().await?;
 
         // Send login success message with session ID
@@ -347,15 +343,19 @@ impl Session {
     async fn apply_workspace_permission(&self, user_id: Uuid, workspace: &str) -> Result<()> {
         let auth_pool = &self.dbhub.auth_pool;
 
+        dotenv().ok();
+        let readwrite_role = read_value_with_default("MAIN_READWRITE_ROLE", "ytx_main_readwrite")?;
+
         sqlx::query(
             r#"
-            INSERT INTO ytx_user_workspace (user_id, workspace_name, user_role, is_valid, register_time)
-            VALUES ($1, $2, 'readwrite', FALSE, now())
-            ON CONFLICT (user_id, workspace_name) DO NOTHING
+            INSERT INTO ytx_role_workspace (user_id, workspace, role, is_valid, register_time)
+            VALUES ($1, $2, $3, FALSE, now())
+            ON CONFLICT (user_id, workspace) DO NOTHING
             "#,
         )
         .bind(user_id)
         .bind(workspace)
+        .bind(&readwrite_role)
         .execute(auth_pool)
         .await?;
 
@@ -473,7 +473,8 @@ impl Session {
     async fn handle_update_document_dir(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: UpdateDocumentDir = from_value(msg.value.clone())?;
+        let mut value: UpdateDocumentDir =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse UpdateDocumentDir")?;
 
         value.session_id = self.session_id.to_string();
 
@@ -498,7 +499,8 @@ impl Session {
     async fn handle_update_default_unit(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let value: UpdateDefaultUnit = from_value(msg.value.clone())?;
+        let value: UpdateDefaultUnit =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse UpdateDefaultUnit")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -625,7 +627,7 @@ impl Session {
             .ok_or(anyhow!("pgpool not initialized"))?;
 
         let value: FetchTree =
-            from_value(msg.value.clone()).context("Failed to parse FetchTree")?;
+            from_value(msg.value.clone()).with_context(|| "Failed to parse FetchTree")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -699,7 +701,7 @@ impl Session {
         let (user_id, pool, sender) = self.resolve_context()?;
 
         let mut value: NodeInsert =
-            from_value(msg.value.clone()).context("Failed to parse NodeInsert")?;
+            from_value(msg.value.clone()).with_context(|| "Failed to parse NodeInsert")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -748,7 +750,8 @@ impl Session {
     async fn handle_node_update(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: Update = from_value(msg.value.clone()).context("Failed to parse Update")?;
+        let mut value: Update =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse Node Update")?;
 
         value.session_id = self.session_id.to_string();
         let table_name = format!("{}_node", value.section);
@@ -773,7 +776,8 @@ impl Session {
     async fn handle_node_drag(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: NodeDrag = from_value(msg.value.clone())?;
+        let mut value: NodeDrag =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse NodeDrag")?;
 
         value.session_id = self.session_id.to_string();
         let section = &value.section;
@@ -826,7 +830,8 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: LeafRemove = from_value(msg.value.clone())?;
+        let mut value: LeafRemove =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse LeafRemove")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -958,7 +963,8 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let value: SupportCheckBeforeRemove = from_value(msg.value.clone())?;
+        let value: SupportCheckBeforeRemove = from_value(msg.value.clone())
+            .with_context(|| "Failed to parse SupportCheckBeforeRemove")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1012,7 +1018,8 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: LeafCheckBeforeRemove = from_value(msg.value.clone())?;
+        let mut value: LeafCheckBeforeRemove = from_value(msg.value.clone())
+            .with_context(|| "Failed to parse LeafCheckBeforeRemove")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1066,7 +1073,8 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: BranchRemove = from_value(msg.value.clone())?;
+        let mut value: BranchRemove =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse BranchRemove")?;
 
         value.session_id = self.session_id.to_string();
 
@@ -1110,7 +1118,7 @@ impl Session {
         let (user_id, pool, sender) = self.resolve_context()?;
 
         let mut value: SupportRemove =
-            from_value(msg.value.clone()).context("Failed to parse SupportRemove")?;
+            from_value(msg.value.clone()).with_context(|| "Failed to parse SupportRemove")?;
 
         value.session_id = self.session_id.to_string();
 
@@ -1159,7 +1167,8 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: SupportReplace = from_value(msg.value.clone())?;
+        let mut value: SupportReplace =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse SupportReplace")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1209,7 +1218,8 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: LeafReplace = from_value(msg.value.clone())?;
+        let mut value: LeafReplace =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse LeafReplace")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1320,7 +1330,8 @@ impl Session {
             .as_ref()
             .ok_or(anyhow!("pgpool not initialized"))?;
 
-        let mut value: FetchTable = from_value(msg.value.clone())?;
+        let mut value: FetchTable =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse FetchTable")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1368,7 +1379,8 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: EntryInsert = from_value(msg.value.clone())?;
+        let mut value: EntryInsert =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse EntryInsert")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1419,7 +1431,8 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: Update = from_value(msg.value.clone())?;
+        let mut value: Update =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse Entry Update")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1455,7 +1468,8 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: UpdateEntryValue = from_value(msg.value.clone())?;
+        let mut value: UpdateEntryValue =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse UpdateEntryValue")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1508,7 +1522,8 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: UpdateEntryRhsNode = from_value(msg.value.clone())?;
+        let mut value: UpdateEntryRhsNode =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse UpdateEntryRhsNode")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1577,7 +1592,8 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: UpdateEntrySupportNode = from_value(msg.value.clone())?;
+        let mut value: UpdateEntrySupportNode = from_value(msg.value.clone())
+            .with_context(|| "Failed to parse UpdateEntrySupportNode")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1630,7 +1646,8 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: EntryRemove = from_value(msg.value.clone())?;
+        let mut value: EntryRemove =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse EntryRemove")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1687,7 +1704,8 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: CheckAction = from_value(msg.value.clone())?;
+        let mut value: CheckAction =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse CheckAction")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1730,7 +1748,8 @@ impl Session {
     async fn handle_update_settlement(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: Update = from_value(msg.value.clone())?;
+        let mut value: Update =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse Update")?;
 
         value.session_id = self.session_id.to_string();
         let table_name = format!("{}_settlement", value.section);
