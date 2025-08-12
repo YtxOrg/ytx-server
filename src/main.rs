@@ -12,17 +12,15 @@ use tokio::net::TcpListener;
 
 use crate::config::*;
 use crate::constant::YTX_SECRET_PATH;
-use crate::dbhub::build_url;
-use crate::dbhub::create_pool;
+use crate::dbhub::{DbHub, build_url, create_pool};
 use crate::vault::*;
 use anyhow::{Context, Result};
-use dbhub::DbHub;
 use websocket::WebSocket;
 
 use crate::dbhub::sql_factory::SqlFactory;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<()> {
     // Load environment variables
     dotenv().ok();
 
@@ -50,9 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let vault_addr_clone = vault_addr.clone();
         let token_clone = token.clone();
         tokio::spawn(async move {
-            if let Err(e) = periodic_renewal(vault_addr_clone, token_clone).await {
-                eprintln!("Vault token periodic renewal failed: {:?}", e);
-            }
+            periodic_renewal(vault_addr_clone, token_clone).await;
         });
     }
 
@@ -68,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query("SELECT 1")
         .execute(&auth_pool)
         .await
-        .map_err(|e| format!("Failed to connect to auth DB: {}", e))?;
+        .context("Failed to connect to auth DB")?;
 
     let db_hub = Arc::new(DbHub::new(
         base_postgres_url,

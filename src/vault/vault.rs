@@ -4,11 +4,7 @@ use serde_json::Value;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
-pub async fn read_vault_data(
-    vault_addr: &str,
-    token: &str,
-    secret_path: &str,
-) -> Result<Value, anyhow::Error> {
+pub async fn read_vault_data(vault_addr: &str, token: &str, secret_path: &str) -> Result<Value> {
     let url = format!("{}/v1/{}", vault_addr.trim_end_matches('/'), secret_path);
 
     let mut headers = HeaderMap::new();
@@ -28,7 +24,7 @@ pub async fn read_vault_data(
     Ok(json["data"]["data"].clone())
 }
 
-pub async fn renew_vault_token(vault_addr: &str, token: &str) -> Result<(), anyhow::Error> {
+pub async fn renew_vault_token(vault_addr: &str, token: &str) -> Result<()> {
     let url = format!(
         "{}/v1/auth/token/renew-self",
         vault_addr.trim_end_matches('/')
@@ -47,7 +43,7 @@ pub async fn renew_vault_token(vault_addr: &str, token: &str) -> Result<(), anyh
     }
 }
 
-pub async fn periodic_renewal(vault_addr: String, token: String) -> Result<()> {
+pub async fn periodic_renewal(vault_addr: String, token: String) {
     let renew_interval = Duration::from_secs(20 * 24 * 60 * 60);
     loop {
         sleep(renew_interval).await;

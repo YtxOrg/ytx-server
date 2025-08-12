@@ -4,6 +4,7 @@ use crate::dbhub::sql_factory::SqlFactory;
 use crate::websocket::Session;
 
 use crate::Local;
+use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use std::sync::Arc;
 use tokio::net::TcpStream;
@@ -52,18 +53,17 @@ pub async fn send_public_message(
     sender: broadcast::Sender<String>,
     msg_type: MsgType,
     value: serde_json::Value,
-) -> Result<(), String> {
+) -> Result<()> {
     let message = serde_json::json!({
         MSG_TYPE: msg_type,
         VALUE: value,
     })
     .to_string();
 
-    sender.send(message).map_err(|e| {
+    sender.send(message).with_context(|| {
         format!(
-            "[{}] Failed to broadcast public message: {}",
+            "[{}] Failed to broadcast public message",
             Local::now().format("%Y-%m-%d %H:%M:%S"),
-            e
         )
     })?;
 
@@ -74,7 +74,7 @@ pub async fn send_private_message(
     ws_writer: Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>,
     msg_type: MsgType,
     value: serde_json::Value,
-) -> Result<(), String> {
+) -> Result<()> {
     let message = serde_json::json!({
         MSG_TYPE: msg_type,
         VALUE: value
@@ -86,11 +86,10 @@ pub async fn send_private_message(
         .await
         .send(Message::Text(message.into()))
         .await
-        .map_err(|e| {
+        .with_context(|| {
             format!(
-                "[{}] Failed to broadcast private message: {}",
-                Local::now().format("%Y-%m-%d %H:%M:%S"),
-                e
+                "[{}] Failed to broadcast private message",
+                Local::now().format("%Y-%m-%d %H:%M:%S")
             )
         })
 }

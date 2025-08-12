@@ -38,12 +38,7 @@ impl DbHub {
         }
     }
 
-    pub async fn init_pool(
-        &self,
-        db_url: &str,
-        database: &str,
-        role: &str,
-    ) -> Result<PgPool, String> {
+    pub async fn init_pool(&self, db_url: &str, database: &str, role: &str) -> Result<PgPool> {
         let mut pools = self.pools.lock().await;
         let key = (database.to_string(), role.to_string());
         let now = Instant::now();
@@ -61,18 +56,16 @@ impl DbHub {
         Ok(pool)
     }
 
-    pub async fn get_role_password(&self, role: &str) -> Result<String, String> {
+    pub async fn get_role_password(&self, role: &str) -> Result<String> {
         if let Some(token) = &self.vault_token {
-            let data = read_vault_data(&self.vault_addr, token, YTX_SECRET_PATH)
-                .await
-                .map_err(|e| e.to_string())?;
-
-            get_vault_password(&data, role).map_err(|e| e.to_string())
+            let data = read_vault_data(&self.vault_addr, token, YTX_SECRET_PATH).await?;
+            let password = get_vault_password(&data, role)?;
+            Ok(password)
         } else {
             dotenv().ok();
-
-            std::env::var(format!("{}_PASSWORD", role.to_uppercase()))
-                .map_err(|_| format!("No password found for role {}", role))
+            let var_name = format!("{}_PASSWORD", role.to_uppercase());
+            let pw = std::env::var(&var_name)?;
+            Ok(pw)
         }
     }
 
@@ -98,7 +91,11 @@ impl DbHub {
         });
     }
 
-    pub async fn get_sender(&self, database: &str, role: &str) -> broadcast::Sender<String> {
+    pub async fn get_sender(
+        &self,
+        database: &str,
+        role: &str,
+    ) -> Result<broadcast::Sender<String>> {
         let mut senders = self.senders.lock().await;
         let key = (database.to_string(), role.to_string());
         let now = Instant::now();
@@ -106,19 +103,19 @@ impl DbHub {
         if let Some((sender, last_used)) = senders.get_mut(&key) {
             println!("Old broadcast: {:?}", key);
             *last_used = now;
-            return sender.clone();
+            return Ok(sender.clone());
         }
 
         println!("New broadcast: {:?}", key);
 
         let (sender, _) = broadcast::channel(100);
         senders.insert(key, (sender.clone(), now));
-        sender
+        Ok(sender)
     }
 }
 
-pub async fn create_pool(db_url: &str) -> Result<PgPool, String> {
-    PgPoolOptions::new()
+pub async fn create_pool(db_url: &str) -> Result<PgPool> {
+    let pool = PgPoolOptions::new()
         .max_connections(4)
         .min_connections(2)
         .acquire_timeout(Duration::from_secs(10))
@@ -126,8 +123,9 @@ pub async fn create_pool(db_url: &str) -> Result<PgPool, String> {
         .max_lifetime(Duration::from_secs(3600))
         .test_before_acquire(true)
         .connect(db_url)
-        .await
-        .map_err(|e| format!("Failed to create pool for {}: {}", db_url, e))
+        .await?;
+
+    Ok(pool)
 }
 
 pub fn build_url(

@@ -6,7 +6,8 @@ use crate::websocket::websocket::{send_private_message, send_public_message};
 
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 
-use anyhow::Result;
+use anyhow::Context;
+use anyhow::{Result, anyhow};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use chrono::{DateTime, Local, Utc};
 use futures::future::join_all;
@@ -95,12 +96,12 @@ impl Session {
     async fn handle_message(
         &mut self,
         msg: Result<Message, tokio_tungstenite::tungstenite::Error>,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         let text = match msg {
             Ok(Message::Text(text)) => text,
             Ok(_) => return Ok(()),
             Err(e) => {
-                return Err(format!(
+                return Err(anyhow!(
                     "[{}] Session handle_message Err: {}",
                     Local::now().format("%Y-%m-%d %H:%M:%S"),
                     e
@@ -108,7 +109,7 @@ impl Session {
             }
         };
 
-        let msg: Msg = serde_json::from_str(&text).map_err(|e| format!("Invalid JSON: {e}"))?;
+        let msg: Msg = serde_json::from_str(&text)?;
 
         match msg.msg_type {
             MsgType::Login => self.handle_login(&msg).await?,
@@ -117,7 +118,10 @@ impl Session {
         }
 
         if self.user_id.is_none() {
-            return Err("Unauthorized: must login first".to_string());
+            return Err(anyhow!(
+                "[{}] Session handle_message Err: User not logged in",
+                Local::now().format("%Y-%m-%d %H:%M:%S")
+            ));
         }
 
         match msg.msg_type {
@@ -173,19 +177,18 @@ impl Session {
 }
 
 impl Session {
-    async fn handle_register(&mut self, msg: &Msg) -> Result<(), String> {
-        let value: RegisterInfo = from_value(msg.value.clone())
-            .map_err(|e| format!("Failed to parse RegisterInfo: {e}"))?;
+    async fn handle_register(&mut self, msg: &Msg) -> Result<()> {
+        let value: RegisterInfo = from_value(msg.value.clone())?;
 
         let email = &value.email;
         let password = &value.password;
 
         if email.trim().is_empty() || password.trim().is_empty() {
-            return Err("Email and password cannot be empty".to_string());
+            return Err(anyhow!("Email and password cannot be empty"));
         }
 
         if !ValidateEmail::validate_email(email) {
-            return Err("Invalid email format".to_string());
+            return Err(anyhow!("Invalid email format"));
         }
 
         let auth_pool = &self.dbhub.auth_pool;
@@ -193,11 +196,10 @@ impl Session {
         let existing = sqlx::query("SELECT 1 FROM ytx_user WHERE email = $1")
             .bind(email)
             .fetch_optional(auth_pool)
-            .await
-            .map_err(|e| format!("Database ytx_user query error: {}", e))?;
+            .await?;
 
         if existing.is_some() {
-            return Err("Email already registered".to_string());
+            return Err(anyhow!("Email already registered"));
         }
 
         let salt = SaltString::generate(&mut OsRng);
@@ -205,7 +207,7 @@ impl Session {
 
         let password_hash = argon2
             .hash_password(value.password.as_bytes(), &salt)
-            .map_err(|e| format!("Failed to hash password: {}", e))?
+            .map_err(|e| anyhow!("Failed to hash password: {}", e))?
             .to_string();
 
         let user_id = Uuid::now_v7();
@@ -220,21 +222,19 @@ impl Session {
         .bind(email)
         .bind(&password_hash)
         .execute(auth_pool)
-        .await
-        .map_err(|e| format!("Failed to insert user: {}", e))?;
+        .await?;
 
         Ok(())
     }
 
-    async fn handle_login(&mut self, msg: &Msg) -> Result<(), String> {
+    async fn handle_login(&mut self, msg: &Msg) -> Result<()> {
         // Check if already logged in
         if self.user_id.is_some() {
             return Ok(());
         }
 
         // Parse login information
-        let value: LoginInfo =
-            from_value(msg.value.clone()).map_err(|e| format!("Failed to parse LoginInfo: {e}"))?;
+        let value: LoginInfo = from_value(msg.value.clone())?;
 
         let email = &value.email;
         let workspace = &value.workspace;
@@ -249,32 +249,25 @@ impl Session {
         )
         .bind(email)
         .fetch_optional(auth_pool)
-        .await
-        .map_err(|e| format!("Database ytx_user query error: {}", e))?;
+        .await?;
 
         if let Some(row) = row {
-            let id: uuid::Uuid = row
-                .try_get("id")
-                .map_err(|e| format!("Failed to get user id: {}", e))?;
-
-            let password_hash: String = row
-                .try_get("password_hash")
-                .map_err(|e| format!("Failed to get password hash: {}", e))?;
-
+            let id: uuid::Uuid = row.try_get("id")?;
+            let password_hash: String = row.try_get("password_hash")?;
             let parsed_hash = PasswordHash::new(&password_hash)
-                .map_err(|e| format!("Failed to parse password hash: {}", e))?;
+                .map_err(|e| anyhow!("Failed to parse password hash: {}", e))?;
 
             Argon2::default()
                 .verify_password(password.as_bytes(), &parsed_hash)
-                .map_err(|_| "Invalid password".to_string())?;
+                .map_err(|e| anyhow!("Password verification failed: {}", e))?;
 
             self.user_id = Some(id);
             println!("User {} logged in successfully", email);
         } else {
-            return Err("User not found or inactive".to_string());
+            return Err(anyhow!("User not found or inactive"));
         }
 
-        let user_id = self.user_id.ok_or("User ID not set")?;
+        let user_id = self.user_id.ok_or_else(|| anyhow!("User ID not set"))?;
 
         let row = sqlx::query(
             r#"
@@ -286,15 +279,13 @@ impl Session {
         .bind(user_id)
         .bind(workspace)
         .fetch_optional(auth_pool)
-        .await
-        .map_err(|e| format!("Database ytx_user_workspace query error: {}", e))?;
+        .await?;
 
         let user_role: String = if let Some(row) = row {
-            row.try_get("user_role")
-                .map_err(|e| format!("Failed to get user_role: {}", e))?
+            row.try_get("user_role")?
         } else {
             self.apply_workspace_permission(user_id, workspace).await?;
-            return Err("Workspace access pending approval".to_string());
+            return Err(anyhow!("Workspace access pending approval"));
         };
 
         let row = sqlx::query(
@@ -306,14 +297,12 @@ impl Session {
         )
         .bind(workspace)
         .fetch_optional(auth_pool)
-        .await
-        .map_err(|e| format!("Database ytx_workspace_database query error: {}", e))?;
+        .await?;
 
         let database_name: String = if let Some(row) = row {
-            row.try_get("database_name")
-                .map_err(|e| format!("Failed to get database_name: {}", e))?
+            row.try_get("database_name")?
         } else {
-            return Err("Workspace database not found or inactive".to_string());
+            return Err(anyhow!("Workspace database not found or inactive"));
         };
 
         let role_password: String = self.dbhub.get_role_password(&user_role).await?;
@@ -323,8 +312,7 @@ impl Session {
             &user_role,
             &role_password,
             &database_name,
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
 
         // send_private_message(self.ws_writer.clone(), MsgType::LoginFailed, json!({})).await?;
 
@@ -332,8 +320,7 @@ impl Session {
         let pool = self
             .dbhub
             .init_pool(&main_url, &database_name, &user_role)
-            .await
-            .map_err(|e| format!("DbHub init_pool error: {e}"))?;
+            .await?;
 
         self.pgpool = Some(pool.clone());
 
@@ -351,16 +338,13 @@ impl Session {
         .await?;
 
         self.push_tree().await?;
+
         Ok(())
     }
 }
 
 impl Session {
-    async fn apply_workspace_permission(
-        &self,
-        user_id: Uuid,
-        workspace: &str,
-    ) -> Result<(), String> {
+    async fn apply_workspace_permission(&self, user_id: Uuid, workspace: &str) -> Result<()> {
         let auth_pool = &self.dbhub.auth_pool;
 
         sqlx::query(
@@ -373,17 +357,16 @@ impl Session {
         .bind(user_id)
         .bind(workspace)
         .execute(auth_pool)
-        .await
-        .map_err(|e| format!("Failed to apply for workspace permission: {}", e))?;
+        .await?;
 
         Ok(())
     }
 
-    async fn push_tree(&self) -> Result<(), String> {
+    async fn push_tree(&self) -> Result<()> {
         let pool = self
             .pgpool
             .as_ref()
-            .ok_or("pgpool not initialized")?
+            .ok_or_else(|| anyhow!("pgpool not initialized"))?
             .clone();
 
         let writer = self.ws_writer.clone();
@@ -395,17 +378,14 @@ impl Session {
 
             async move {
                 let sql_gen = self.sql_factory.get(&section).ok_or_else(|| {
-                    format!("No SqlGen implementation found for section: '{}'", section)
+                    anyhow!("No SqlGen implementation found for section: '{}'", section)
                 })?;
 
                 let mut section_obj = serde_json::Map::new();
                 section_obj.insert(SECTION.into(), Value::String(section.clone()));
 
                 let node_sql = sql_gen.select_node(&section);
-                let node_rows = sqlx::query(&node_sql)
-                    .fetch_all(&pool)
-                    .await
-                    .map_err(|e| format!("Query failed for table '{}_node': {}", section, e))?;
+                let node_rows = sqlx::query(&node_sql).fetch_all(&pool).await?;
 
                 if node_rows.is_empty() {
                     return Ok(());
@@ -414,16 +394,12 @@ impl Session {
                 let path_table = format!("{}_path", section);
                 let path_sql = format!("SELECT * FROM {}", path_table);
 
-                let path_rows = sqlx::query(&path_sql)
-                    .fetch_all(&pool)
-                    .await
-                    .map_err(|e| format!("Query failed for table '{}': {}", path_table, e))?;
+                let path_rows = sqlx::query(&path_sql).fetch_all(&pool).await?;
 
                 if path_rows.is_empty() {
-                    return Err(
+                    return Err(anyhow::anyhow!(
                         "Data inconsistency detected: node_rows and path_rows are not synchronized"
-                            .to_string(),
-                    );
+                    ));
                 }
 
                 let node_array = pg_to_json_rows(&node_rows)?;
@@ -433,7 +409,7 @@ impl Session {
                 section_obj.insert(PATH.into(), path_array);
 
                 send_private_message(writer, MsgType::PushTree, Value::Object(section_obj)).await?;
-                Ok::<(), String>(())
+                Ok(())
             }
         });
 
@@ -453,19 +429,18 @@ impl Session {
         Ok(())
     }
 
-    async fn push_global_config(&self) -> Result<(), String> {
+    async fn push_global_config(&self) -> Result<()> {
         let pool = self
             .pgpool
             .as_ref()
-            .ok_or("pgpool not initialized")?
+            .ok_or(anyhow!("pgpool not initialized"))?
             .clone();
 
         let writer = self.ws_writer.clone();
 
         let rows = sqlx::query(r#"SELECT section, default_unit, document_dir FROM global_config"#)
             .fetch_all(&pool)
-            .await
-            .map_err(|e| e.to_string())?;
+            .await?;
 
         let configs_json: Vec<_> = rows
             .into_iter()
@@ -495,11 +470,10 @@ impl Session {
 }
 
 impl Session {
-    async fn handle_update_document_dir(&self, msg: &Msg) -> Result<(), String> {
+    async fn handle_update_document_dir(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: UpdateDocumentDir = from_value(msg.value.clone())
-            .map_err(|e| format!("Failed to parse UpdateDocumentDir: {e}"))?;
+        let mut value: UpdateDocumentDir = from_value(msg.value.clone())?;
 
         value.session_id = self.session_id.to_string();
 
@@ -510,8 +484,7 @@ impl Session {
         .bind(user_id)
         .bind(&value.section)
         .execute(pool)
-        .await
-        .map_err(|e| format!("Failed to update document_dir: {e}"))?;
+        .await?;
 
         send_public_message(sender.clone(), msg.msg_type.clone(), json!(value)).await?;
 
@@ -522,11 +495,10 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_update_default_unit(&self, msg: &Msg) -> Result<(), String> {
+    async fn handle_update_default_unit(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let value: UpdateDefaultUnit = from_value(msg.value.clone())
-            .map_err(|e| format!("Failed to parse UpdateDefaultUnit: {e}"))?;
+        let value: UpdateDefaultUnit = from_value(msg.value.clone())?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -536,8 +508,7 @@ impl Session {
                 "SELECT EXISTS(SELECT 1 FROM finance_entry WHERE is_valid = TRUE)",
             )
             .fetch_one(pool)
-            .await
-            .map_err(|e| format!("Failed to check if finance_entry exists: {e}"))?;
+            .await?;
 
             if exists {
                 send_private_message(
@@ -547,9 +518,9 @@ impl Session {
                 )
                 .await?;
 
-                return Err(
-                    "Cannot change default unit: finance entries already exist.".to_string()
-                );
+                return Err(anyhow!(
+                    "Cannot change default unit: finance entries already exist."
+                ));
             }
         }
 
@@ -560,8 +531,7 @@ impl Session {
             .bind(user_id)
             .bind(section)
             .execute(pool)
-            .await
-            .map_err(|e| format!("Failed to update default_unit: {e}"))?;
+            .await?;
 
         send_public_message(sender.clone(), msg.msg_type.clone(), json!(value)).await?;
 
@@ -584,15 +554,15 @@ impl Session {
     ///
     /// # Arguments
     /// * `database` - The name of the database to subscribe to.
-    async fn start_broadcast(&mut self, database: &str, role: &str) -> Result<(), String> {
+    async fn start_broadcast(&mut self, database: &str, role: &str) -> Result<()> {
         // Get the broadcast sender first
-        self.sender = Some(self.dbhub.get_sender(database, role).await);
+        self.sender = Some(self.dbhub.get_sender(database, role).await?);
 
         // Then get a receiver for this specific client
         let mut receiver = self
             .sender
             .as_ref()
-            .ok_or("Broadcast sender not initialized")?
+            .ok_or_else(|| anyhow!("Broadcast sender not initialized"))?
             .subscribe();
 
         // Clone the WebSocket writer for use in the spawned task
@@ -630,27 +600,39 @@ impl Session {
         Ok(())
     }
 
-    pub fn resolve_context(&self) -> Result<(Uuid, &PgPool, &broadcast::Sender<String>), String> {
-        let user_id = self.user_id.ok_or("user_id is missing")?;
-        let pool = self.pgpool.as_ref().ok_or("pgpool not initialized")?;
-        let sender = self.sender.as_ref().ok_or("sender not initialized")?;
+    pub fn resolve_context(&self) -> Result<(Uuid, &PgPool, &broadcast::Sender<String>)> {
+        let user_id = self.user_id.ok_or(anyhow!("user_id is missing"))?;
+
+        let pool = self
+            .pgpool
+            .as_ref()
+            .ok_or(anyhow!("pgpool not initialized"))?;
+
+        let sender = self
+            .sender
+            .as_ref()
+            .ok_or(anyhow!("sender not initialized"))?;
+
         Ok((user_id, pool, sender))
     }
 }
 
 impl Session {
-    async fn handle_fetch_tree(&self, msg: &Msg) -> Result<(), String> {
-        let pool = self.pgpool.as_ref().ok_or("pgpool not initialized")?;
+    async fn handle_fetch_tree(&self, msg: &Msg) -> Result<()> {
+        let pool = self
+            .pgpool
+            .as_ref()
+            .ok_or(anyhow!("pgpool not initialized"))?;
 
         let value: FetchTree =
-            from_value(msg.value.clone()).map_err(|e| format!("Failed to parse FetchTree: {e}"))?;
+            from_value(msg.value.clone()).context("Failed to parse FetchTree")?;
 
         let section = &value.section;
         validate_section(section)?;
 
         match section.as_str() {
             TASK | SALE | PURCHASE => {}
-            _ => return Err(format!("Invalid section: '{}'", section)),
+            _ => return Err(anyhow!("Invalid section: '{}'", section)),
         }
 
         let start = &value.start;
@@ -659,18 +641,17 @@ impl Session {
         let sql_gen = self
             .sql_factory
             .get(&section)
-            .ok_or_else(|| format!("No SqlGen implementation found for section: '{}'", section))?;
+            .ok_or_else(|| anyhow!("No SqlGen implementation found for section: '{}'", section))?;
 
         let sql = sql_gen
             .fetch_tree(section)
-            .ok_or_else(|| format!("fetch_tree returned None for section: '{}'", section))?;
+            .ok_or_else(|| anyhow!("fetch_tree returned None for section: '{}'", section))?;
 
         let node_rows = sqlx::query(&sql)
             .bind(start)
             .bind(end)
             .fetch_all(&*pool)
-            .await
-            .map_err(|e| format!("Database query failed: {e}"))?;
+            .await?;
 
         let mut obj = serde_json::Map::new();
         obj.insert(SECTION.into(), Value::String(section.clone()));
@@ -685,13 +666,12 @@ impl Session {
             let path_rows = sqlx::query(&path_sql)
                 .fetch_all(pool)
                 .await
-                .map_err(|e| format!("Query failed for table '{}': {}", path_table, e))?;
+                .with_context(|| format!("Query failed for table '{}'", path_table))?;
 
             if path_rows.is_empty() {
-                return Err(
+                return Err(anyhow!(
                     "Data inconsistency detected: node_rows and path_rows are not synchronized"
-                        .to_string(),
-                );
+                ));
             }
 
             let node_array = pg_to_json_rows(&node_rows)?;
@@ -715,11 +695,11 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_node_insert(&self, msg: &Msg) -> Result<(), String> {
+    async fn handle_node_insert(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: NodeInsert = from_value(msg.value.clone())
-            .map_err(|e| format!("Failed to parse NodeInsert: {}", e))?;
+        let mut value: NodeInsert =
+            from_value(msg.value.clone()).context("Failed to parse NodeInsert")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -732,16 +712,14 @@ impl Session {
         let ancestor_id = path
             .get(ANCESTOR)
             .and_then(|v| v.as_str())
-            .ok_or("Missing or invalid 'ancestor'")?
-            .parse()
-            .map_err(|e| format!("Invalid ancestor UUID: {}", e))?;
+            .ok_or(anyhow!("Missing or invalid 'ancestor'"))?
+            .parse()?;
 
         let descendant_id = path
             .get(DESCENDANT)
             .and_then(|v| v.as_str())
-            .ok_or("Missing or invalid 'descendant'")?
-            .parse()
-            .map_err(|e| format!("Invalid descendant UUID: {}", e))?;
+            .ok_or(anyhow!("Missing or invalid 'descendant'"))?
+            .parse()?;
 
         let node_table = format!("{}_node", section);
 
@@ -751,17 +729,12 @@ impl Session {
         node.insert(CREATED_BY.to_string(), Value::String(user_id.to_string()));
         node.insert(CREATED_TIME.to_string(), Value::String(now.clone()));
 
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|e| format!("Failed to begin transaction: {}", e))?;
+        let mut tx = pool.begin().await?;
 
         insert_row(node_table.as_str(), &node, &mut tx).await?;
         insert_path(&section, ancestor_id, descendant_id, &mut tx).await?;
 
-        tx.commit()
-            .await
-            .map_err(|e| format!("Failed to commit transaction: {}", e))?;
+        tx.commit().await?;
 
         send_public_message(sender.clone(), msg.msg_type.clone(), json!(value)).await?;
 
@@ -772,11 +745,10 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_node_update(&self, msg: &Msg) -> Result<(), String> {
+    async fn handle_node_update(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: Update =
-            from_value(msg.value.clone()).map_err(|e| format!("Failed to parse Update: {}", e))?;
+        let mut value: Update = from_value(msg.value.clone()).context("Failed to parse Update")?;
 
         value.session_id = self.session_id.to_string();
         let table_name = format!("{}_node", value.section);
@@ -798,11 +770,10 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_node_drag(&self, msg: &Msg) -> Result<(), String> {
+    async fn handle_node_drag(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: NodeDrag = from_value(msg.value.clone())
-            .map_err(|e| format!("Failed to parse NodeDrag: {}", e))?;
+        let mut value: NodeDrag = from_value(msg.value.clone())?;
 
         value.session_id = self.session_id.to_string();
         let section = &value.section;
@@ -818,32 +789,25 @@ impl Session {
         let ancestor_id: Uuid = path
             .get(ANCESTOR)
             .and_then(|v| v.as_str())
-            .ok_or("Missing or invalid 'ancestor'")?
-            .parse()
-            .map_err(|e| format!("Invalid ancestor UUID: {}", e))?;
+            .ok_or(anyhow!("Missing or invalid 'ancestor'"))?
+            .parse()?;
 
         let descendant_id: Uuid = path
             .get(DESCENDANT)
             .and_then(|v| v.as_str())
-            .ok_or("Missing or invalid 'descendant'")?
-            .parse()
-            .map_err(|e| format!("Invalid descendant UUID: {}", e))?;
+            .ok_or(anyhow!("Missing or invalid 'descendant'"))?
+            .parse()?;
 
         node.insert(UPDATED_BY.to_string(), Value::String(user_id.to_string()));
         node.insert(UPDATED_TIME.to_string(), Value::String(now.to_rfc3339()));
 
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|e| format!("Failed to begin transaction: {}", e))?;
+        let mut tx = pool.begin().await?;
 
         delete_descendant_path(&section, descendant_id, &mut tx).await?;
         insert_path(&section, ancestor_id, descendant_id, &mut tx).await?;
         update_row(&node_table, descendant_id, &node, tx.as_mut()).await?;
 
-        tx.commit()
-            .await
-            .map_err(|e| format!("Failed to commit transaction: {}", e))?;
+        tx.commit().await?;
 
         send_public_message(sender.clone(), msg.msg_type.clone(), json!(value)).await?;
 
@@ -854,7 +818,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_leaf_remove(&self, msg: &Msg) -> Result<(), String> {
+    async fn handle_leaf_remove(&self, msg: &Msg) -> Result<()> {
         println!(
             "[{}] Start handle_leaf_remove",
             Local::now().format("%Y-%m-%d %H:%M:%S")
@@ -862,8 +826,7 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: LeafRemove = from_value(msg.value.clone())
-            .map_err(|e| format!("Failed to parse LeafRemove: {}", e))?;
+        let mut value: LeafRemove = from_value(msg.value.clone())?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -878,29 +841,17 @@ impl Session {
         let sql_gen = self
             .sql_factory
             .get(section)
-            .ok_or_else(|| format!("No SqlGen found for section: {}", section))?;
+            .ok_or_else(|| anyhow!("No SqlGen found for section: {}", section))?;
 
         let mut delta_hash: HashMap<Uuid, (Decimal, Decimal)> = HashMap::new();
 
         if let Some(sql) = sql_gen.collect_leaf_entry(section) {
-            let rows = sqlx::query(&sql)
-                .bind(id)
-                .fetch_all(pool)
-                .await
-                .map_err(|e| format!("Failed to query collect_leaf_reference: {}", e))?;
+            let rows = sqlx::query(&sql).bind(id).fetch_all(pool).await?;
 
             for row in rows {
-                let node_id: Uuid = row
-                    .try_get(NODE_ID)
-                    .map_err(|e| format!("Failed to query {NODE_ID}: {}", e))?;
-
-                let entry_id: Uuid = row
-                    .try_get(ENTRY_ID)
-                    .map_err(|e| format!("Failed to query {ENTRY_ID}: {}", e))?;
-
-                let support_id: Option<Uuid> = row
-                    .try_get(SUPPORT_ID)
-                    .map_err(|e| format!("Failed to query {SUPPORT_ID}: {}", e))?;
+                let node_id: Uuid = row.try_get(NODE_ID)?;
+                let entry_id: Uuid = row.try_get(ENTRY_ID)?;
+                let support_id: Option<Uuid> = row.try_get(SUPPORT_ID)?;
 
                 leaf_entry
                     .entry(node_id)
@@ -914,17 +865,9 @@ impl Session {
                         .push(entry_id);
                 }
 
-                let debit: Decimal = row
-                    .try_get(DEBIT)
-                    .map_err(|e| format!("Failed to query debit: {}", e))?;
-
-                let credit: Decimal = row
-                    .try_get(CREDIT)
-                    .map_err(|e| format!("Failed to query credit: {}", e))?;
-
-                let rate: Decimal = row
-                    .try_get(RATE)
-                    .map_err(|e| format!("Failed to query rate: {}", e))?;
+                let debit: Decimal = row.try_get(DEBIT)?;
+                let credit: Decimal = row.try_get(CREDIT)?;
+                let rate: Decimal = row.try_get(RATE)?;
 
                 let delta = delta_hash
                     .entry(node_id)
@@ -935,10 +878,7 @@ impl Session {
             }
         }
 
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|e| format!("Failed to begin transaction: {}", e))?;
+        let mut tx = pool.begin().await?;
 
         if !delta_hash.is_empty() {
             let count = delta_hash.len();
@@ -984,25 +924,20 @@ impl Session {
             .bind(&initial_deltas)
             .bind(&final_deltas)
             .fetch_all(tx.as_mut())
-            .await
-            .map_err(|e| format!("Failed to batch update node totals: {}", e))?;
+            .await?;
         }
 
         println!("Removing node...");
         remove_node(&section, id, user_id, now, sql_gen, &mut tx).await?;
 
         println!("Removing leaf entry...");
-        remove_leaf_reference(&section, id, user_id, now, sql_gen, &mut tx)
-            .await
-            .map_err(|e| e.to_string())?;
+        remove_leaf_reference(&section, id, user_id, now, sql_gen, &mut tx).await?;
 
         println!("Deleting path...");
         delete_descendant_path(&section, id, &mut tx).await?;
 
         println!("Committing transaction...");
-        tx.commit()
-            .await
-            .map_err(|e| format!("Failed to commit transaction: {}", e))?;
+        tx.commit().await?;
 
         println!("Sending public message...");
         send_public_message(sender.clone(), msg.msg_type.clone(), json!(value)).await?;
@@ -1015,7 +950,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_support_check_before_remove(&self, msg: &Msg) -> Result<(), String> {
+    async fn handle_support_check_before_remove(&self, msg: &Msg) -> Result<()> {
         println!(
             "[{}] Start handle_support_check_before_remove",
             Local::now().format("%Y-%m-%d %H:%M:%S")
@@ -1023,8 +958,7 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let value: SupportCheckBeforeRemove = from_value(msg.value.clone())
-            .map_err(|e| format!("Failed to parse SupportCheckBeforeRemove request: {}", e))?;
+        let value: SupportCheckBeforeRemove = from_value(msg.value.clone())?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1036,15 +970,12 @@ impl Session {
         let sql_gen = self
             .sql_factory
             .get(section)
-            .ok_or_else(|| format!("No SqlGen found for section: {}", section))?;
+            .ok_or_else(|| anyhow!("No SqlGen found for section: {}", section))?;
 
         let support_reference = has_support_reference(section, id, sql_gen, pool).await?;
 
         if !support_reference {
-            let mut tx = pool
-                .begin()
-                .await
-                .map_err(|e| format!("Failed to begin transaction: {}", e))?;
+            let mut tx = pool.begin().await?;
 
             println!("Removing node...");
             remove_node(&section, id, user_id, now, sql_gen, &mut tx).await?;
@@ -1052,9 +983,7 @@ impl Session {
             println!("Deleting path...");
             delete_descendant_path(&section, id, &mut tx).await?;
 
-            tx.commit()
-                .await
-                .map_err(|e| format!("Failed to commit transaction: {}", e))?;
+            tx.commit().await?;
 
             send_public_message(
                 sender.clone(),
@@ -1075,7 +1004,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_leaf_check_before_remove(&self, msg: &Msg) -> Result<(), String> {
+    async fn handle_leaf_check_before_remove(&self, msg: &Msg) -> Result<()> {
         println!(
             "[{}] Start handle_leaf_check_before_remove",
             Local::now().format("%Y-%m-%d %H:%M:%S")
@@ -1083,8 +1012,7 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: LeafCheckBeforeRemove = from_value(msg.value.clone())
-            .map_err(|e| format!("Failed to parse LeafCheckBeforeRemove request: {}", e))?;
+        let mut value: LeafCheckBeforeRemove = from_value(msg.value.clone())?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1095,16 +1023,13 @@ impl Session {
         let sql_gen = self
             .sql_factory
             .get(section)
-            .ok_or_else(|| format!("No SqlGen found for section: {}", section))?;
+            .ok_or_else(|| anyhow!("No SqlGen found for section: {}", section))?;
 
         value.leaf_reference = has_leaf_reference(section, id, sql_gen, pool).await?;
         value.external_reference = has_external_reference(id, sql_gen, pool).await?;
 
         if !value.leaf_reference && !value.external_reference {
-            let mut tx = pool
-                .begin()
-                .await
-                .map_err(|e| format!("Failed to begin transaction: {}", e))?;
+            let mut tx = pool.begin().await?;
 
             println!("Removing node...");
             remove_node(&section, id, user_id, now, sql_gen, &mut tx).await?;
@@ -1112,9 +1037,7 @@ impl Session {
             println!("Deleting path...");
             delete_descendant_path(&section, id, &mut tx).await?;
 
-            tx.commit()
-                .await
-                .map_err(|e| format!("Failed to commit transaction: {}", e))?;
+            tx.commit().await?;
 
             send_public_message(
                 sender.clone(),
@@ -1135,7 +1058,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_branch_remove(&self, msg: &Msg) -> Result<(), String> {
+    async fn handle_branch_remove(&self, msg: &Msg) -> Result<()> {
         println!(
             "[{}] Start handle_branch_remove",
             Local::now().format("%Y-%m-%d %H:%M:%S")
@@ -1143,8 +1066,7 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: BranchRemove = from_value(msg.value.clone())
-            .map_err(|e| format!("Failed to parse RemoveBranchNode: {}", e))?;
+        let mut value: BranchRemove = from_value(msg.value.clone())?;
 
         value.session_id = self.session_id.to_string();
 
@@ -1156,14 +1078,11 @@ impl Session {
         let sql_gen = self
             .sql_factory
             .get(section)
-            .ok_or_else(|| format!("No SqlGen found for section: {}", section))?;
+            .ok_or_else(|| anyhow!("No SqlGen found for section: {}", section))?;
 
         let now = Utc::now();
 
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|e| format!("Failed to begin transaction: {}", e))?;
+        let mut tx = pool.begin().await?;
 
         remove_node(&section, id, user_id, now, sql_gen, &mut tx).await?;
 
@@ -1171,10 +1090,7 @@ impl Session {
         delete_descendant_path(&section, id, &mut tx).await?;
         delete_ancestor_path(&section, id, &mut tx).await?;
 
-        tx.commit()
-            .await
-            .map_err(|e| format!("Failed to commit transaction: {}", e))?;
-
+        tx.commit().await?;
         send_public_message(sender.clone(), msg.msg_type.clone(), json!(value)).await?;
 
         println!(
@@ -1185,7 +1101,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_support_remove(&self, msg: &Msg) -> Result<(), String> {
+    async fn handle_support_remove(&self, msg: &Msg) -> Result<()> {
         println!(
             "[{}] Start handle_support_remove",
             Local::now().format("%Y-%m-%d %H:%M:%S")
@@ -1193,8 +1109,8 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: SupportRemove = from_value(msg.value.clone())
-            .map_err(|e| format!("Failed to parse SupportRemove: {}", e))?;
+        let mut value: SupportRemove =
+            from_value(msg.value.clone()).context("Failed to parse SupportRemove")?;
 
         value.session_id = self.session_id.to_string();
 
@@ -1206,14 +1122,11 @@ impl Session {
         let sql_gen = self
             .sql_factory
             .get(section)
-            .ok_or_else(|| format!("No SqlGen found for section: {}", section))?;
+            .ok_or_else(|| anyhow!("No SqlGen found for section: {}", section))?;
 
         let now = Utc::now();
 
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|e| format!("Failed to begin transaction: {}", e))?;
+        let mut tx = pool.begin().await?;
 
         println!("Removing support node...");
         remove_node(&section, id, user_id, now, sql_gen, &mut tx).await?;
@@ -1225,9 +1138,7 @@ impl Session {
         delete_descendant_path(&section, id, &mut tx).await?;
 
         println!("Committing transaction...");
-        tx.commit()
-            .await
-            .map_err(|e| format!("Failed to commit transaction: {}", e))?;
+        tx.commit().await?;
 
         println!("Sending public message...");
         send_public_message(sender.clone(), msg.msg_type.clone(), json!(value)).await?;
@@ -1240,7 +1151,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_support_replace(&self, msg: &Msg) -> Result<(), String> {
+    async fn handle_support_replace(&self, msg: &Msg) -> Result<()> {
         println!(
             "[{}] Start handle_support_replace",
             Local::now().format("%Y-%m-%d %H:%M:%S")
@@ -1248,8 +1159,7 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: SupportReplace = from_value(msg.value.clone())
-            .map_err(|e| format!("Failed to parse SupportReplace: {}", e))?;
+        let mut value: SupportReplace = from_value(msg.value.clone())?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1265,12 +1175,9 @@ impl Session {
         let sql_gen = self
             .sql_factory
             .get(section)
-            .ok_or_else(|| format!("No SqlGen found for section: {}", section))?;
+            .ok_or_else(|| anyhow!("No SqlGen found for section: {}", section))?;
 
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|e| format!("Failed to begin transaction: {}", e))?;
+        let mut tx = pool.begin().await?;
 
         println!("Removing support node...");
         remove_node(&section, old_id, user_id, now, sql_gen, &mut tx).await?;
@@ -1282,9 +1189,7 @@ impl Session {
         delete_descendant_path(&section, old_id, &mut tx).await?;
 
         println!("Committing transaction...");
-        tx.commit()
-            .await
-            .map_err(|e| format!("Failed to commit transaction: {}", e))?;
+        tx.commit().await?;
 
         send_public_message(sender.clone(), msg.msg_type.clone(), json!(value)).await?;
 
@@ -1296,7 +1201,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_leaf_replace(&self, msg: &Msg) -> Result<(), String> {
+    async fn handle_leaf_replace(&self, msg: &Msg) -> Result<()> {
         println!(
             "[{}] Start handle_leaf_replace",
             Local::now().format("%Y-%m-%d %H:%M:%S")
@@ -1304,14 +1209,13 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: LeafReplace = from_value(msg.value.clone())
-            .map_err(|e| format!("Failed to parse LeafReplace: {}", e))?;
+        let mut value: LeafReplace = from_value(msg.value.clone())?;
 
         let section = &value.section;
         validate_section(section)?;
 
         if section == SALE || section == PURCHASE {
-            return Err(format!(
+            return Err(anyhow!(
                 "Replace operation is not supported for section '{}'",
                 section
             ));
@@ -1324,32 +1228,28 @@ impl Session {
         let sql_gen = self
             .sql_factory
             .get(section)
-            .ok_or_else(|| format!("No SqlGen implementation found for section: '{}'", section))?;
+            .ok_or_else(|| anyhow!("No SqlGen implementation found for section: '{}'", section))?;
 
         if let Some(sql) = sql_gen.has_replace_conflict(section) {
             let conflict_exists: bool = sqlx::query_scalar(&sql)
                 .bind(old_id)
                 .bind(new_id)
                 .fetch_one(pool)
-                .await
-                .map_err(|e| format!("Failed to check replace conflict: {}", e))?;
+                .await?;
 
             if conflict_exists {
                 value.status = false;
                 send_private_message(self.ws_writer.clone(), msg.msg_type.clone(), json!(value))
                     .await?;
 
-                return Err(format!("Replace conflict detected in section {}", section));
+                return Err(anyhow!("Replace conflict detected in section {}", section));
             }
         }
 
         let now = Utc::now();
 
         println!("Merge leaf total...");
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|e| format!("Failed to begin transaction: {}", e))?;
+        let mut tx = pool.begin().await?;
 
         if let Some(merge_sql) = sql_gen.merge_node_total(section) {
             sqlx::query(&merge_sql)
@@ -1358,8 +1258,7 @@ impl Session {
                 .bind(old_id)
                 .bind(new_id)
                 .execute(tx.as_mut())
-                .await
-                .map_err(|e| format!("Failed to merge node totals: {}", e))?;
+                .await?;
         }
 
         println!("Removing leaf node...");
@@ -1387,13 +1286,7 @@ impl Session {
                     .bind(old_id) // $3
                     .bind(new_id) // $4
                     .execute(tx.as_mut())
-                    .await
-                    .map_err(|e| {
-                        format!(
-                            "Failed to replace item external entry in table {}: {}",
-                            entry_table, e
-                        )
-                    })?;
+                    .await?;
             }
         }
 
@@ -1401,9 +1294,7 @@ impl Session {
         delete_descendant_path(&section, old_id, tx.as_mut()).await?;
 
         println!("Committing transaction...");
-        tx.commit()
-            .await
-            .map_err(|e| format!("Failed to commit transaction: {}", e))?;
+        tx.commit().await?;
 
         value.status = true;
         send_public_message(sender.clone(), msg.msg_type.clone(), json!(value)).await?;
@@ -1418,16 +1309,18 @@ impl Session {
 }
 
 impl Session {
-    async fn handle_fetch_table(&self, msg: &Msg) -> Result<(), String> {
+    async fn handle_fetch_table(&self, msg: &Msg) -> Result<()> {
         println!(
             "[{}] Start handle_fetch_table",
             Local::now().format("%Y-%m-%d %H:%M:%S")
         );
 
-        let pool = self.pgpool.as_ref().ok_or("pgpool not initialized")?;
+        let pool = self
+            .pgpool
+            .as_ref()
+            .ok_or(anyhow!("pgpool not initialized"))?;
 
-        let mut value: FetchTable = from_value(msg.value.clone())
-            .map_err(|e| format!("Failed to parse FetchTable: {}", e))?;
+        let mut value: FetchTable = from_value(msg.value.clone())?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1438,20 +1331,16 @@ impl Session {
         let sql_gen = self
             .sql_factory
             .get(section)
-            .ok_or_else(|| format!("No SqlGen found for section: {}", section))?;
+            .ok_or_else(|| anyhow!("No SqlGen found for section: {}", section))?;
 
         let sql = match kind {
             LEAF_NODE => Some(sql_gen.leaf_entry(section)),
             SUPPORT_NODE => sql_gen.support_entry(section),
             _ => None,
         }
-        .ok_or_else(|| format!("No SQL statement for kind: {}", kind))?;
+        .ok_or_else(|| anyhow!("No SQL statement for kind: {}", kind))?;
 
-        let rows = sqlx::query(&sql)
-            .bind(node_id)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| format!("Query failed: {}", e))?;
+        let rows = sqlx::query(&sql).bind(node_id).fetch_all(pool).await?;
 
         if rows.is_empty() {
             println!(
@@ -1471,7 +1360,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_entry_insert(&self, msg: &Msg) -> Result<(), String> {
+    async fn handle_entry_insert(&self, msg: &Msg) -> Result<()> {
         println!(
             "[{}] Start handle_entry_insert",
             Local::now().format("%Y-%m-%d %H:%M:%S")
@@ -1479,8 +1368,7 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: EntryInsert = from_value(msg.value.clone())
-            .map_err(|e| format!("Failed to parse EntryInsert: {}", e))?;
+        let mut value: EntryInsert = from_value(msg.value.clone())?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1492,10 +1380,7 @@ impl Session {
 
         let entry_table = format!("{}_entry", section);
 
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|e| format!("Failed to begin transaction: {}", e))?;
+        let mut tx = pool.begin().await?;
 
         entry.insert(USER_ID.to_string(), Value::String(user_id.to_string()));
         entry.insert(CREATED_BY.to_string(), Value::String(user_id.to_string()));
@@ -1515,9 +1400,7 @@ impl Session {
 
         insert_row(entry_table.as_str(), &entry, tx.as_mut()).await?;
 
-        tx.commit()
-            .await
-            .map_err(|e| format!("Failed to commit transaction: {}", e))?;
+        tx.commit().await?;
 
         send_public_message(sender.clone(), msg.msg_type.clone(), json!(value)).await?;
 
@@ -1528,7 +1411,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_entry_update(&self, msg: &Msg) -> Result<(), String> {
+    async fn handle_entry_update(&self, msg: &Msg) -> Result<()> {
         println!(
             "[{}] Start handle_entry_update",
             Local::now().format("%Y-%m-%d %H:%M:%S")
@@ -1536,8 +1419,7 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: Update = from_value(msg.value.clone())
-            .map_err(|e| format!("Failed to parse EntryUpdate: {}", e))?;
+        let mut value: Update = from_value(msg.value.clone())?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1565,7 +1447,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_update_entry_value(&self, msg: &Msg) -> Result<(), String> {
+    async fn handle_update_entry_value(&self, msg: &Msg) -> Result<()> {
         println!(
             "[{}] Start handle_update_entry_value",
             Local::now().format("%Y-%m-%d %H:%M:%S")
@@ -1573,8 +1455,7 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: UpdateEntryValue = from_value(msg.value.clone())
-            .map_err(|e| format!("Failed to parse UpdateEntryValue: {}", e))?;
+        let mut value: UpdateEntryValue = from_value(msg.value.clone())?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1588,10 +1469,7 @@ impl Session {
 
         let entry_table = format!("{}_entry", section);
 
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|e| format!("Failed to begin transaction: {}", e))?;
+        let mut tx = pool.begin().await?;
 
         cache.insert(UPDATED_BY.to_string(), Value::String(user_id.to_string()));
         cache.insert(UPDATED_TIME.to_string(), Value::String(now_str.clone()));
@@ -1610,9 +1488,7 @@ impl Session {
 
         update_row(&entry_table, entry_id, cache, tx.as_mut()).await?;
 
-        tx.commit()
-            .await
-            .map_err(|e| format!("Failed to commit transaction: {}", e))?;
+        tx.commit().await?;
 
         send_public_message(sender.clone(), msg.msg_type.clone(), json!(value)).await?;
 
@@ -1624,7 +1500,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_update_entry_rhs_node(&self, msg: &Msg) -> Result<(), String> {
+    async fn handle_update_entry_rhs_node(&self, msg: &Msg) -> Result<()> {
         println!(
             "[{}] Start handle_update_rhs_node",
             Local::now().format("%Y-%m-%d %H:%M:%S")
@@ -1632,8 +1508,7 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: UpdateEntryRhsNode = from_value(msg.value.clone())
-            .map_err(|e| format!("Failed to parse UpdateRhsNode: {}", e))?;
+        let mut value: UpdateEntryRhsNode = from_value(msg.value.clone())?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1652,10 +1527,7 @@ impl Session {
 
         let entry_table = format!("{}_entry", section);
 
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|e| format!("Failed to begin transaction: {}", e))?;
+        let mut tx = pool.begin().await?;
 
         entry.insert(UPDATED_BY.to_string(), Value::String(user_id.to_string()));
         entry.insert(UPDATED_TIME.to_string(), Value::String(now_str.clone()));
@@ -1683,12 +1555,9 @@ impl Session {
             .bind(new_rhs_id) //  → $3
             .bind(entry_id) // id → $4
             .execute(tx.as_mut())
-            .await
-            .map_err(|e| format!("Failed to update entry rhs node: {}", e))?;
+            .await?;
 
-        tx.commit()
-            .await
-            .map_err(|e| format!("Failed to commit transaction: {}", e))?;
+        tx.commit().await?;
 
         send_public_message(sender.clone(), msg.msg_type.clone(), json!(value)).await?;
 
@@ -1700,7 +1569,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_update_entry_support_node(&self, msg: &Msg) -> Result<(), String> {
+    async fn handle_update_entry_support_node(&self, msg: &Msg) -> Result<()> {
         println!(
             "[{}] Start handle_update_support_node",
             Local::now().format("%Y-%m-%d %H:%M:%S")
@@ -1708,8 +1577,7 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: UpdateEntrySupportNode = from_value(msg.value.clone())
-            .map_err(|e| format!("Failed to parse UpdateSupportNode: {}", e))?;
+        let mut value: UpdateEntrySupportNode = from_value(msg.value.clone())?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1718,7 +1586,7 @@ impl Session {
         let entry_id = value.entry_id;
 
         if entry_id == Uuid::nil() {
-            return Err("entry_id cannot be nil".to_string());
+            return Err(anyhow!("entry_id cannot be nil"));
         }
 
         let now = Utc::now();
@@ -1742,8 +1610,7 @@ impl Session {
             .bind(new_support_id) //  → $3
             .bind(entry_id) // id → $4
             .execute(pool)
-            .await
-            .map_err(|e| format!("Failed to update entry support node: {}", e))?;
+            .await?;
 
         send_public_message(sender.clone(), msg.msg_type.clone(), json!(value)).await?;
 
@@ -1755,7 +1622,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_entry_remove(&self, msg: &Msg) -> Result<(), String> {
+    async fn handle_entry_remove(&self, msg: &Msg) -> Result<()> {
         println!(
             "[{}] Start handle_entry_remove",
             Local::now().format("%Y-%m-%d %H:%M:%S")
@@ -1763,8 +1630,7 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: EntryRemove = from_value(msg.value.clone())
-            .map_err(|e| format!("Failed to parse EntryRemove: {}", e))?;
+        let mut value: EntryRemove = from_value(msg.value.clone())?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1775,10 +1641,7 @@ impl Session {
         let now_str = now.to_rfc3339();
         value.session_id = self.session_id.to_string();
 
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|e| format!("Failed to begin transaction: {}", e))?;
+        let mut tx = pool.begin().await?;
 
         let sql = format!(
             "UPDATE {0}_entry SET is_valid = FALSE, updated_by = $1, updated_time = $2 WHERE id = $3",
@@ -1790,8 +1653,7 @@ impl Session {
             .bind(now)
             .bind(entry_id)
             .execute(tx.as_mut())
-            .await
-            .map_err(|e| format!("Failed to mark entry as deleted: {e}"))?;
+            .await?;
 
         if let Some(lhs) = &mut value.lhs_node {
             lhs.insert(UPDATED_BY.to_string(), Value::String(user_id.to_string()));
@@ -1805,9 +1667,7 @@ impl Session {
             update_node_total(section, rhs, tx.as_mut()).await?;
         }
 
-        tx.commit()
-            .await
-            .map_err(|e| format!("Failed to commit transaction: {}", e))?;
+        tx.commit().await?;
 
         send_public_message(sender.clone(), msg.msg_type.clone(), json!(value)).await?;
 
@@ -1819,7 +1679,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_check_action(&self, msg: &Msg) -> Result<(), String> {
+    async fn handle_check_action(&self, msg: &Msg) -> Result<()> {
         println!(
             "[{}] Start handle_check_action",
             Local::now().format("%Y-%m-%d %H:%M:%S")
@@ -1827,8 +1687,7 @@ impl Session {
 
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: CheckAction = from_value(msg.value.clone())
-            .map_err(|e| format!("Failed to parse CheckAction: {}", e))?;
+        let mut value: CheckAction = from_value(msg.value.clone())?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1841,7 +1700,7 @@ impl Session {
         let sql_gen = self
             .sql_factory
             .get(&section)
-            .ok_or_else(|| format!("No SqlGen for section: {}", section))?;
+            .ok_or_else(|| anyhow!("No SqlGen for section: {}", section))?;
 
         let sql = sql_gen.check_action(&section);
 
@@ -1854,8 +1713,7 @@ impl Session {
             .bind(value.check) // $3: check (i32)
             .bind(value.node_id) // $4: node_id
             .execute(pool)
-            .await
-            .map_err(|e| format!("Failed to execute check_action: {}", e))?;
+            .await?;
 
         send_public_message(sender.clone(), msg.msg_type.clone(), json!(value)).await?;
 
@@ -1869,11 +1727,10 @@ impl Session {
 }
 
 impl Session {
-    async fn handle_update_settlement(&self, msg: &Msg) -> Result<(), String> {
+    async fn handle_update_settlement(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: Update = from_value(msg.value.clone())
-            .map_err(|e| format!("Failed to parse update data request: {}", e))?;
+        let mut value: Update = from_value(msg.value.clone())?;
 
         value.session_id = self.session_id.to_string();
         let table_name = format!("{}_settlement", value.section);
@@ -1896,7 +1753,7 @@ impl Session {
     }
 }
 
-fn pg_to_json_rows(rows: &[PgRow]) -> Result<Value, String> {
+fn pg_to_json_rows(rows: &[PgRow]) -> Result<Value> {
     let mut result = Vec::new();
 
     for row in rows {
@@ -2016,7 +1873,7 @@ async fn reconnect_path_before_remove(
     section: &str,
     id: Uuid,
     conn: &mut PgConnection,
-) -> Result<(), String> {
+) -> Result<()> {
     let path_table = format!("{}_path", section);
 
     let sql = format!(
@@ -2047,13 +1904,7 @@ async fn reconnect_path_before_remove(
     sqlx::query(&sql)
         .bind(id) // $1
         .execute(conn)
-        .await
-        .map_err(|e| {
-            format!(
-                "reconnect_path_before_remove failed, {}_path : {}",
-                section, e
-            )
-        })?;
+        .await?;
 
     Ok(())
 }
@@ -2062,7 +1913,7 @@ async fn insert_row(
     table: &str,
     data: &HashMap<String, Value>,
     conn: &mut PgConnection,
-) -> Result<(), String> {
+) -> Result<()> {
     if data.is_empty() {
         return Ok(());
     }
@@ -2093,10 +1944,7 @@ async fn insert_row(
         query = json_to_pg_bind(query, field, value);
     }
 
-    query
-        .execute(&mut *conn)
-        .await
-        .map_err(|e| format!("insert_row failed for table {} : {}", table, e))?;
+    query.execute(&mut *conn).await?;
 
     Ok(())
 }
@@ -2106,7 +1954,7 @@ async fn insert_path(
     ancestor: Uuid,
     descendant: Uuid,
     conn: &mut PgConnection,
-) -> Result<(), String> {
+) -> Result<()> {
     let sql = format!(
         "INSERT INTO {}_path (ancestor, descendant, distance) VALUES ($1, $2, 1) ON CONFLICT DO NOTHING",
         section
@@ -2116,8 +1964,7 @@ async fn insert_path(
         .bind(ancestor)
         .bind(descendant)
         .execute(conn)
-        .await
-        .map_err(|e| format!("insert_path failed for {}_path: {}", section, e))?;
+        .await?;
 
     Ok(())
 }
@@ -2126,31 +1973,15 @@ async fn delete_descendant_path(
     section: &str,
     node_id: Uuid,
     conn: &mut PgConnection,
-) -> Result<(), String> {
+) -> Result<()> {
     let sql = format!("DELETE FROM {}_path WHERE descendant = $1", section);
-
-    sqlx::query(&sql)
-        .bind(node_id)
-        .execute(conn)
-        .await
-        .map_err(|e| format!("delete_descendant_path failed, {}-{}", section, e))?;
-
+    sqlx::query(&sql).bind(node_id).execute(conn).await?;
     Ok(())
 }
 
-async fn delete_ancestor_path(
-    section: &str,
-    node_id: Uuid,
-    conn: &mut PgConnection,
-) -> Result<(), String> {
+async fn delete_ancestor_path(section: &str, node_id: Uuid, conn: &mut PgConnection) -> Result<()> {
     let sql = format!("DELETE FROM {}_path WHERE ancestor = $1", section);
-
-    sqlx::query(&sql)
-        .bind(node_id)
-        .execute(conn)
-        .await
-        .map_err(|e| format!("delete_ancestor_path failed, {}-{}", section, e))?;
-
+    sqlx::query(&sql).bind(node_id).execute(conn).await?;
     Ok(())
 }
 
@@ -2159,7 +1990,7 @@ async fn update_row<'a, E>(
     id: Uuid,
     data: &HashMap<String, Value>,
     executor: E,
-) -> Result<(), String>
+) -> Result<()>
 where
     E: Executor<'a, Database = Postgres>,
 {
@@ -2190,10 +2021,7 @@ where
     }
 
     query = query.bind(id);
-    query
-        .execute(executor)
-        .await
-        .map_err(|e| format!("Failed to update row in table '{}': {}", table, e))?;
+    query.execute(executor).await?;
 
     Ok(())
 }
@@ -2202,20 +2030,18 @@ async fn update_node_total(
     section: &str,
     node: &HashMap<String, Value>,
     conn: &mut PgConnection,
-) -> Result<(), String> {
+) -> Result<()> {
     let id: Uuid = node
         .get("id")
         .and_then(|v| v.as_str())
-        .ok_or("Missing or invalid 'id'")?
-        .parse()
-        .map_err(|e| format!("Invalid 'id' UUID: {}", e))?;
+        .ok_or(anyhow!("Missing or invalid 'id'"))?
+        .parse()?;
 
     let updated_by: Uuid = node
         .get("updated_by")
         .and_then(|v| v.as_str())
-        .ok_or("Missing or invalid 'updated_by'")?
-        .parse()
-        .map_err(|e| format!("Invalid 'updated_by' UUID: {}", e))?;
+        .ok_or(anyhow!("Missing or invalid 'updated_by'"))?
+        .parse()?;
 
     let updated_time = node
         .get("updated_time")
@@ -2225,7 +2051,7 @@ async fn update_node_total(
                 .ok()
                 .map(|dt| dt.with_timezone(&Utc))
         })
-        .ok_or("Missing or invalid 'updated_time'")?;
+        .ok_or(anyhow!("Missing or invalid 'updated_time'"))?;
 
     let initial_delta = match node.get("initial_delta").and_then(|v| v.as_str()) {
         Some(s) => Decimal::from_str(s).unwrap_or_else(|e| {
@@ -2265,8 +2091,7 @@ async fn update_node_total(
         .bind(final_delta)
         .bind(id)
         .execute(conn)
-        .await
-        .map_err(|e| format!("Failed to update node total {id}: {e}"))?;
+        .await?;
 
     Ok(())
 }
@@ -2278,7 +2103,7 @@ async fn remove_node(
     updated_time: DateTime<Utc>,
     sql_gen: &dyn SqlGen,
     conn: &mut PgConnection,
-) -> Result<(), String> {
+) -> Result<()> {
     let sql = sql_gen.remove_node(section);
 
     sqlx::query(&sql)
@@ -2286,13 +2111,7 @@ async fn remove_node(
         .bind(updated_time)
         .bind(id)
         .execute(conn)
-        .await
-        .map_err(|e| {
-            format!(
-                "Failed to remove node (id: {}) in '{}_node': {}",
-                id, section, e
-            )
-        })?;
+        .await?;
 
     Ok(())
 }
@@ -2302,15 +2121,9 @@ async fn has_leaf_reference(
     id: Uuid,
     sql_gen: &dyn SqlGen,
     pool: &PgPool,
-) -> Result<bool, String> {
+) -> Result<bool> {
     let sql = sql_gen.has_leaf_reference(section);
-
-    let exists: bool = sqlx::query_scalar(&sql)
-        .bind(id)
-        .fetch_one(pool)
-        .await
-        .map_err(|e| format!("Check leaf reference failed: {}", e))?;
-
+    let exists: bool = sqlx::query_scalar(&sql).bind(id).fetch_one(pool).await?;
     Ok(exists)
 }
 
@@ -2319,34 +2132,21 @@ async fn has_support_reference(
     id: Uuid,
     sql_gen: &dyn SqlGen,
     pool: &PgPool,
-) -> Result<bool, String> {
+) -> Result<bool> {
     let Some(sql) = sql_gen.has_support_reference(section) else {
         return Ok(false);
     };
 
-    let exists: bool = sqlx::query_scalar(&sql)
-        .bind(id)
-        .fetch_one(pool)
-        .await
-        .map_err(|e| format!("Check support reference failed: {}", e))?;
-
+    let exists: bool = sqlx::query_scalar(&sql).bind(id).fetch_one(pool).await?;
     Ok(exists)
 }
 
-async fn has_external_reference(
-    id: Uuid,
-    sql_gen: &dyn SqlGen,
-    pool: &PgPool,
-) -> Result<bool, String> {
+async fn has_external_reference(id: Uuid, sql_gen: &dyn SqlGen, pool: &PgPool) -> Result<bool> {
     let Some(sql) = sql_gen.has_external_reference() else {
         return Ok(false);
     };
 
-    let exists: bool = sqlx::query_scalar(&sql)
-        .bind(id)
-        .fetch_one(pool)
-        .await
-        .map_err(|e| format!("Check external reference failed: {}", e))?;
+    let exists: bool = sqlx::query_scalar(&sql).bind(id).fetch_one(pool).await?;
 
     Ok(exists)
 }
@@ -2358,7 +2158,7 @@ async fn remove_leaf_reference(
     updated_time: DateTime<Utc>,
     sql_gen: &dyn SqlGen,
     conn: &mut PgConnection,
-) -> Result<(), String> {
+) -> Result<()> {
     let sql = sql_gen.remove_leaf_entry(section);
 
     sqlx::query(&sql)
@@ -2366,8 +2166,7 @@ async fn remove_leaf_reference(
         .bind(updated_time) // $2
         .bind(id) // $3
         .execute(conn)
-        .await
-        .map_err(|e| format!("Check support reference failed: {}", e))?;
+        .await?;
 
     Ok(())
 }
@@ -2379,7 +2178,7 @@ async fn remove_support_reference(
     updated_time: DateTime<Utc>,
     sql_gen: &dyn SqlGen,
     conn: &mut PgConnection,
-) -> Result<(), String> {
+) -> Result<()> {
     let Some(sql) = sql_gen.remove_support_reference(section) else {
         return Ok(());
     };
@@ -2389,8 +2188,7 @@ async fn remove_support_reference(
         .bind(updated_time)
         .bind(id)
         .execute(conn)
-        .await
-        .map_err(|e| format!("Check support reference failed: {}", e))?;
+        .await?;
 
     Ok(())
 }
@@ -2402,7 +2200,7 @@ async fn replace_support_reference(
     updated_by: Uuid,
     updated_time: DateTime<Utc>,
     conn: &mut PgConnection,
-) -> Result<(), String> {
+) -> Result<()> {
     let sql = format!(
         r#"
         UPDATE {}_entry
@@ -2421,8 +2219,7 @@ async fn replace_support_reference(
         .bind(updated_time)
         .bind(old_id)
         .execute(conn)
-        .await
-        .map_err(|e| format!("replace_support_reference failed for {}: {}", section, e))?;
+        .await?;
 
     Ok(())
 }
@@ -2435,7 +2232,7 @@ async fn replace_leaf_reference(
     updated_time: DateTime<Utc>,
     sql_gen: &dyn SqlGen,
     conn: &mut PgConnection,
-) -> Result<(), String> {
+) -> Result<()> {
     let Some(sql) = sql_gen.replace_leaf_entry(section) else {
         return Ok(());
     };
@@ -2446,41 +2243,23 @@ async fn replace_leaf_reference(
         .bind(old_id)
         .bind(new_id)
         .execute(conn)
-        .await
-        .map_err(|e| format!("replace_leaf_reference failed for {}: {}", section, e))?;
+        .await?;
 
     Ok(())
 }
 
-fn validate_section(section: &str) -> Result<(), String> {
+fn validate_section(section: &str) -> Result<()> {
     if ALLOWED_SECTIONS.contains(section) {
         Ok(())
     } else {
-        Err(format!("Illegal section name: '{}'", section))
+        Err(anyhow!("Illegal section name: '{}'", section))
     }
 }
 
-pub fn validate_field(field: &str) -> Result<(), String> {
+pub fn validate_field(field: &str) -> Result<()> {
     if ALLOWED_FIELDS.contains(field) {
         Ok(())
     } else {
-        Err(format!("Illegal field name: '{}'", field))
+        Err(anyhow!("Illegal field name: '{}'", field))
     }
-}
-
-async fn is_database_empty(conn: &mut PgConnection) -> Result<bool, String> {
-    let (is_empty,): (bool,) = sqlx::query_as(
-        r#"
-        SELECT NOT EXISTS (
-            SELECT 1
-            FROM pg_catalog.pg_tables
-            WHERE schemaname = 'public'
-        )
-        "#,
-    )
-    .fetch_one(conn)
-    .await
-    .map_err(|e| format!("Failed to check if database is empty: {}", e))?;
-
-    Ok(is_empty)
 }
