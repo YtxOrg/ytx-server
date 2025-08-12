@@ -12,6 +12,8 @@ use tokio::net::TcpListener;
 
 use crate::config::*;
 use crate::constant::YTX_SECRET_PATH;
+use crate::dbhub::build_url;
+use crate::dbhub::create_pool;
 use crate::vault::*;
 use anyhow::{Context, Result};
 use dbhub::DbHub;
@@ -31,11 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let vault_token = var("VAULT_TOKEN").ok().filter(|t| !t.is_empty());
     let listen_addr = var("LISTEN_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
 
-    let admin_user = read_value_with_default("ADMIN_USER", "ytx_admin")?;
-    let mut admin_password = var("ADMIN_PASSWORD").unwrap_or_default();
-
-    let readonly_user = read_value_with_default("READONLY_USER", "ytx_readonly")?;
-    let mut readonly_password = var("READONLY_PASSWORD").unwrap_or_default();
+    let auth_db = read_value_with_default("AUTH_DB", "ytx_auth")?;
 
     let readwrite_user = read_value_with_default("READWRITE_USER", "ytx_readwrite")?;
     let mut readwrite_password = var("READWRITE_PASSWORD").unwrap_or_default();
@@ -47,8 +45,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await
             .context("Failed to read YTX role passwords from Vault")?;
 
-        admin_password = get_vault_password(&ytx_data, &admin_user)?;
-        readonly_password = get_vault_password(&ytx_data, &readonly_user)?;
         readwrite_password = get_vault_password(&ytx_data, &readwrite_user)?;
 
         let vault_addr_clone = vault_addr.clone();
@@ -60,14 +56,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    let db_hub = Arc::new(DbHub::new(base_postgres_url, vault_addr, vault_token));
+    let auth_url = build_url(
+        &base_postgres_url,
+        &readwrite_user,
+        &readwrite_password,
+        &auth_db,
+    )?;
 
-    {
-        let mut passwords = db_hub.role_passwords.lock().await;
-        passwords.insert(admin_user.clone(), admin_password.clone());
-        passwords.insert(readonly_user.clone(), readonly_password.clone());
-        passwords.insert(readwrite_user.clone(), readwrite_password.clone());
-    }
+    let auth_pool = create_pool(&auth_url).await?;
+
+    sqlx::query("SELECT 1")
+        .execute(&auth_pool)
+        .await
+        .map_err(|e| format!("Failed to connect to auth DB: {}", e))?;
+
+    let db_hub = Arc::new(DbHub::new(
+        base_postgres_url,
+        vault_addr,
+        vault_token,
+        auth_pool,
+    ));
 
     let sql_factory = Arc::new(SqlFactory::new());
 

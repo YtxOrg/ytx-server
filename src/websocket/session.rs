@@ -6,6 +6,8 @@ use crate::websocket::websocket::{send_private_message, send_public_message};
 
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 
+use anyhow::Result;
+use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use chrono::{DateTime, Local, Utc};
 use futures::future::join_all;
 use futures_util::{
@@ -15,7 +17,7 @@ use futures_util::{
 use rust_decimal::Decimal;
 use serde_json::{Map, Number, Value, from_value, json};
 use sqlx::{
-    Column, Connection, Executor, PgConnection, PgPool, Postgres, Row, TypeInfo,
+    Column, Executor, PgConnection, PgPool, Postgres, Row, TypeInfo,
     postgres::{PgArguments, PgRow},
     query::Query,
     types::Json,
@@ -25,7 +27,6 @@ use tokio::{
     sync::{Mutex, broadcast, watch},
 };
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
-use urlencoding::encode;
 use uuid::Uuid;
 
 pub struct Session {
@@ -177,44 +178,107 @@ impl Session {
         let value: LoginInfo =
             from_value(msg.value.clone()).map_err(|e| format!("Failed to parse LoginInfo: {e}"))?;
 
-        let user = &value.user;
-        println!("Login info: {}@{}", user, value.workspace);
+        let email = &value.email;
+        let workspace = &value.workspace;
+        let password = &value.password;
 
-        // Build connection string and test connection
-        let conn_str = build_pg_url(user, &value.password, &value.workspace);
-        let mut temp_conn = match PgConnection::connect(&conn_str).await {
-            Ok(conn) => conn,
-            Err(e) => {
-                println!("{e}");
+        println!("Login info: {}@{}", email, workspace);
 
-                send_private_message(self.ws_writer.clone(), MsgType::LoginFailed, json!({}))
-                    .await?;
+        let auth_pool = &self.dbhub.auth_pool;
 
-                return Ok(());
-            }
-        };
+        let row = sqlx::query(
+            "SELECT id, password_hash FROM ytx_user WHERE email = $1 AND is_valid = TRUE",
+        )
+        .bind(email)
+        .fetch_optional(auth_pool)
+        .await
+        .map_err(|e| format!("Database ytx_user query error: {}", e))?;
 
-        // Check if database is YTX managed
-        let managed = is_ytx_managed(&mut temp_conn).await.unwrap_or(false);
-        if !managed {
-            send_private_message(self.ws_writer.clone(), MsgType::LoginFailed, json!({})).await?;
-            return Ok(());
+        if let Some(row) = row {
+            let id: uuid::Uuid = row
+                .try_get("id")
+                .map_err(|e| format!("Failed to get user id: {}", e))?;
+
+            let password_hash: String = row
+                .try_get("password_hash")
+                .map_err(|e| format!("Failed to get password hash: {}", e))?;
+
+            let parsed_hash = PasswordHash::new(&password_hash)
+                .map_err(|e| format!("Failed to parse password hash: {}", e))?;
+
+            Argon2::default()
+                .verify_password(password.as_bytes(), &parsed_hash)
+                .map_err(|_| "Invalid password".to_string())?;
+
+            self.user_id = Some(id);
+            println!("User {} logged in successfully", email);
+        } else {
+            return Err("User not found or inactive".to_string());
         }
 
-        // Get user role and user_id
-        let role = get_role(&mut temp_conn, user).await?;
-        self.user_id = Some(get_user_id(&mut temp_conn, &value.user).await?);
+        let user_id = self.user_id.ok_or("User ID not set")?;
+
+        let row = sqlx::query(
+            r#"
+                SELECT user_role
+                FROM ytx_user_workspace
+                WHERE user_id = $1 AND workspace_name = $2 AND is_valid = TRUE
+                "#,
+        )
+        .bind(user_id)
+        .bind(workspace)
+        .fetch_optional(auth_pool)
+        .await
+        .map_err(|e| format!("Database ytx_user_workspace query error: {}", e))?;
+
+        let user_role: String = if let Some(row) = row {
+            row.try_get("user_role")
+                .map_err(|e| format!("Failed to get user_role: {}", e))?
+        } else {
+            return Err("Workspace not found or inactive".to_string());
+        };
+
+        let row = sqlx::query(
+            r#"
+                SELECT database_name
+                FROM ytx_workspace_database
+                WHERE workspace_name = $1 AND is_valid = TRUE
+         "#,
+        )
+        .bind(workspace)
+        .fetch_optional(auth_pool)
+        .await
+        .map_err(|e| format!("Database ytx_workspace_database query error: {}", e))?;
+
+        let database_name: String = if let Some(row) = row {
+            row.try_get("database_name")
+                .map_err(|e| format!("Failed to get database_name: {}", e))?
+        } else {
+            return Err("Workspace database not found or inactive".to_string());
+        };
+
+        let role_password: String = self.dbhub.get_role_password(&user_role).await?;
+
+        let main_url = build_url(
+            &self.dbhub.base_postgres_url,
+            &user_role,
+            &role_password,
+            &database_name,
+        )
+        .map_err(|e| e.to_string())?;
+
+        // send_private_message(self.ws_writer.clone(), MsgType::LoginFailed, json!({})).await?;
 
         // Initialize connection pool
         let pool = self
             .dbhub
-            .init_pool(&conn_str, value.workspace.clone(), role.clone())
+            .init_pool(&main_url, &database_name, &user_role)
             .await
             .map_err(|e| format!("DbHub init_pool error: {e}"))?;
 
         self.pgpool = Some(pool.clone());
 
-        self.start_broadcast(value.workspace, role).await?;
+        self.start_broadcast(&value.workspace, &user_role).await?;
         self.push_global_config().await?;
 
         // Send login success message with session ID
@@ -438,7 +502,7 @@ impl Session {
     ///
     /// # Arguments
     /// * `database` - The name of the database to subscribe to.
-    async fn start_broadcast(&mut self, database: String, role: String) -> Result<(), String> {
+    async fn start_broadcast(&mut self, database: &str, role: &str) -> Result<(), String> {
         // Get the broadcast sender first
         self.sender = Some(self.dbhub.get_sender(database, role).await);
 
@@ -1748,15 +1812,6 @@ impl Session {
         );
         Ok(())
     }
-}
-
-fn build_pg_url(user: &str, password: &str, database: &str) -> String {
-    format!(
-        "postgresql://{}:{}@localhost:5432/{}?connect_timeout=5",
-        encode(user),
-        encode(password),
-        encode(database)
-    )
 }
 
 fn pg_to_json_rows(rows: &[PgRow]) -> Result<Value, String> {

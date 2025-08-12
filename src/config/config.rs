@@ -1,6 +1,5 @@
 use anyhow::{Result, bail};
 use std::env::var;
-use url::Url;
 
 pub fn read_value_with_default(key: &str, default: &str) -> Result<String> {
     let val = var(key).unwrap_or(default.to_string());
@@ -31,23 +30,4 @@ pub fn read_value_with_default(key: &str, default: &str) -> Result<String> {
     }
 
     Ok(val)
-}
-
-pub fn build_postgres_url(
-    base_url: &str,
-    user: &str,
-    password: &str,
-    database_name: &str,
-) -> Result<String> {
-    let mut url = Url::parse(base_url)?;
-
-    url.set_username(user)
-        .map_err(|()| anyhow::anyhow!("Invalid username"))?;
-
-    url.set_password(Some(password))
-        .map_err(|()| anyhow::anyhow!("Invalid password"))?;
-
-    url.set_path(database_name);
-
-    Ok(url.into())
 }

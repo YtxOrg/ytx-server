@@ -83,7 +83,7 @@ message_struct! {
 // 登录信息
 message_struct! {
     pub struct LoginInfo {
-        pub user: String,
+        pub email: String,
         pub password: String,
         pub workspace: String,
     }
