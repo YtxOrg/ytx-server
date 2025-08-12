@@ -18,6 +18,7 @@ macro_rules! message_struct {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum MsgType {
+    Register,
     Login,
     LoginFailed,
     LoginSuccess,
@@ -86,6 +87,13 @@ message_struct! {
         pub email: String,
         pub password: String,
         pub workspace: String,
+    }
+}
+
+message_struct! {
+    pub struct RegisterInfo {
+        pub email: String,
+        pub password: String,
     }
 }
 

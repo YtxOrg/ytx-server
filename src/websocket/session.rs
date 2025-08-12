@@ -7,13 +7,14 @@ use crate::websocket::websocket::{send_private_message, send_public_message};
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use anyhow::Result;
-use argon2::{Argon2, PasswordHash, PasswordVerifier};
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use chrono::{DateTime, Local, Utc};
 use futures::future::join_all;
 use futures_util::{
     SinkExt, StreamExt,
     stream::{SplitSink, SplitStream},
 };
+use password_hash::rand_core::OsRng;
 use rust_decimal::Decimal;
 use serde_json::{Map, Number, Value, from_value, json};
 use sqlx::{
@@ -28,6 +29,7 @@ use tokio::{
 };
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 use uuid::Uuid;
+use validator::ValidateEmail;
 
 pub struct Session {
     ws_writer: Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>,
@@ -108,14 +110,17 @@ impl Session {
 
         let msg: Msg = serde_json::from_str(&text).map_err(|e| format!("Invalid JSON: {e}"))?;
 
-        if self.user_id.is_none() && msg.msg_type != MsgType::Login {
+        match msg.msg_type {
+            MsgType::Login => self.handle_login(&msg).await?,
+            MsgType::Register => self.handle_register(&msg).await?,
+            _ => {}
+        }
+
+        if self.user_id.is_none() {
             return Err("Unauthorized: must login first".to_string());
         }
 
         match msg.msg_type {
-            // User-related
-            MsgType::Login => self.handle_login(&msg).await,
-
             // Node insertion and movement
             MsgType::NodeInsert => self.handle_node_insert(&msg).await,
             MsgType::NodeDrag => self.handle_node_drag(&msg).await,
@@ -168,6 +173,59 @@ impl Session {
 }
 
 impl Session {
+    async fn handle_register(&mut self, msg: &Msg) -> Result<(), String> {
+        let value: RegisterInfo = from_value(msg.value.clone())
+            .map_err(|e| format!("Failed to parse RegisterInfo: {e}"))?;
+
+        let email = &value.email;
+        let password = &value.password;
+
+        if email.trim().is_empty() || password.trim().is_empty() {
+            return Err("Email and password cannot be empty".to_string());
+        }
+
+        if !ValidateEmail::validate_email(email) {
+            return Err("Invalid email format".to_string());
+        }
+
+        let auth_pool = &self.dbhub.auth_pool;
+
+        let existing = sqlx::query("SELECT 1 FROM ytx_user WHERE email = $1")
+            .bind(email)
+            .fetch_optional(auth_pool)
+            .await
+            .map_err(|e| format!("Database ytx_user query error: {}", e))?;
+
+        if existing.is_some() {
+            return Err("Email already registered".to_string());
+        }
+
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+
+        let password_hash = argon2
+            .hash_password(value.password.as_bytes(), &salt)
+            .map_err(|e| format!("Failed to hash password: {}", e))?
+            .to_string();
+
+        let user_id = Uuid::now_v7();
+
+        sqlx::query(
+            r#"
+        INSERT INTO ytx_user (id, email, password_hash, register_time)
+        VALUES ($1, $2, $3, now())
+        "#,
+        )
+        .bind(user_id)
+        .bind(email)
+        .bind(&password_hash)
+        .execute(auth_pool)
+        .await
+        .map_err(|e| format!("Failed to insert user: {}", e))?;
+
+        Ok(())
+    }
+
     async fn handle_login(&mut self, msg: &Msg) -> Result<(), String> {
         // Check if already logged in
         if self.user_id.is_some() {
