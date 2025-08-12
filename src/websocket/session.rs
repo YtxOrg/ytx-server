@@ -293,7 +293,8 @@ impl Session {
             row.try_get("user_role")
                 .map_err(|e| format!("Failed to get user_role: {}", e))?
         } else {
-            return Err("Workspace not found or inactive".to_string());
+            self.apply_workspace_permission(user_id, workspace).await?;
+            return Err("Workspace access pending approval".to_string());
         };
 
         let row = sqlx::query(
@@ -355,6 +356,29 @@ impl Session {
 }
 
 impl Session {
+    async fn apply_workspace_permission(
+        &self,
+        user_id: Uuid,
+        workspace: &str,
+    ) -> Result<(), String> {
+        let auth_pool = &self.dbhub.auth_pool;
+
+        sqlx::query(
+            r#"
+            INSERT INTO ytx_user_workspace (user_id, workspace_name, user_role, is_valid, register_time)
+            VALUES ($1, $2, 'readwrite', FALSE, now())
+            ON CONFLICT (user_id, workspace_name) DO NOTHING
+            "#,
+        )
+        .bind(user_id)
+        .bind(workspace)
+        .execute(auth_pool)
+        .await
+        .map_err(|e| format!("Failed to apply for workspace permission: {}", e))?;
+
+        Ok(())
+    }
+
     async fn push_tree(&self) -> Result<(), String> {
         let pool = self
             .pgpool
