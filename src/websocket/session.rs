@@ -118,53 +118,55 @@ impl Session {
 
         match msg.msg_type {
             // Node insertion and movement
-            MsgType::NodeInsert => self.handle_node_insert(&msg).await,
-            MsgType::NodeDrag => self.handle_node_drag(&msg).await,
-            MsgType::NodeUpdate => self.handle_node_update(&msg).await,
+            MsgType::NodeInsert => self.handle_node_insert(&msg).await?,
+            MsgType::NodeDrag => self.handle_node_drag(&msg).await?,
+            MsgType::NodeUpdate => self.handle_node_update(&msg).await?,
 
             // Node update
-            MsgType::UpdateNodeDirectionRule => self.handle_node_update(&msg).await,
-            MsgType::UpdateNodeName => self.handle_node_update(&msg).await,
+            MsgType::UpdateNodeDirectionRule => self.handle_node_update(&msg).await?,
+            MsgType::UpdateNodeName => self.handle_node_update(&msg).await?,
 
             // Node removal and replacement
-            MsgType::LeafRemove => self.handle_leaf_remove(&msg).await,
-            MsgType::BranchRemove => self.handle_branch_remove(&msg).await,
-            MsgType::SupportRemove => self.handle_support_remove(&msg).await,
-            MsgType::LeafReplace => self.handle_leaf_replace(&msg).await,
-            MsgType::SupportReplace => self.handle_support_replace(&msg).await,
+            MsgType::LeafRemove => self.handle_leaf_remove(&msg).await?,
+            MsgType::BranchRemove => self.handle_branch_remove(&msg).await?,
+            MsgType::SupportRemove => self.handle_support_remove(&msg).await?,
+            MsgType::LeafReplace => self.handle_leaf_replace(&msg).await?,
+            MsgType::SupportReplace => self.handle_support_replace(&msg).await?,
 
             // Node pre-checks before removal
-            MsgType::LeafCheckBeforeRemove => self.handle_leaf_check_before_remove(&msg).await,
+            MsgType::LeafCheckBeforeRemove => self.handle_leaf_check_before_remove(&msg).await?,
             MsgType::SupportCheckBeforeRemove => {
-                self.handle_support_check_before_remove(&msg).await
+                self.handle_support_check_before_remove(&msg).await?
             }
 
             // Entry operations
-            MsgType::EntryInsert => self.handle_entry_insert(&msg).await,
-            MsgType::EntryUpdate => self.handle_entry_update(&msg).await,
-            MsgType::EntryRemove => self.handle_entry_remove(&msg).await,
-            MsgType::UpdateEntryRhsNode => self.handle_update_entry_rhs_node(&msg).await,
-            MsgType::UpdateEntrySupportNode => self.handle_update_entry_support_node(&msg).await,
-            MsgType::UpdateEntryRate => self.handle_update_entry_value(&msg).await,
-            MsgType::UpdateEntryNumeric => self.handle_update_entry_value(&msg).await,
+            MsgType::EntryInsert => self.handle_entry_insert(&msg).await?,
+            MsgType::EntryUpdate => self.handle_entry_update(&msg).await?,
+            MsgType::EntryRemove => self.handle_entry_remove(&msg).await?,
+            MsgType::UpdateEntryRhsNode => self.handle_update_entry_rhs_node(&msg).await?,
+            MsgType::UpdateEntrySupportNode => self.handle_update_entry_support_node(&msg).await?,
+            MsgType::UpdateEntryRate => self.handle_update_entry_value(&msg).await?,
+            MsgType::UpdateEntryNumeric => self.handle_update_entry_value(&msg).await?,
 
             // Update global config
-            MsgType::UpdateDefaultUnit => self.handle_update_default_unit(&msg).await,
-            MsgType::UpdateDocumentDir => self.handle_update_document_dir(&msg).await,
+            MsgType::UpdateDefaultUnit => self.handle_update_default_unit(&msg).await?,
+            MsgType::UpdateDocumentDir => self.handle_update_document_dir(&msg).await?,
 
             // Settlement operations
-            MsgType::UpdateSettlement => self.handle_update_settlement(&msg).await,
+            MsgType::UpdateSettlement => self.handle_update_settlement(&msg).await?,
 
             // Fetch data
-            MsgType::FetchTable => self.handle_fetch_table(&msg).await,
-            MsgType::FetchTree => self.handle_fetch_tree(&msg).await,
+            MsgType::FetchTable => self.handle_fetch_table(&msg).await?,
+            MsgType::FetchTree => self.handle_fetch_tree(&msg).await?,
 
             // Action check
-            MsgType::CheckAction => self.handle_check_action(&msg).await,
+            MsgType::CheckAction => self.handle_check_action(&msg).await?,
 
             // Unknown or unhandled message types
-            _ => Ok(()),
+            _ => {}
         }
+
+        return Ok(());
     }
 }
 
