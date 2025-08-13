@@ -107,7 +107,14 @@ impl Session {
         let msg: Msg = serde_json::from_str(&text)?;
 
         match msg.msg_type {
-            MsgType::Login => self.handle_login(&msg).await?,
+            MsgType::Login => {
+                if let Err(e) = self.handle_login(&msg).await {
+                    send_private_message(self.ws_writer.clone(), MsgType::LoginFailed, json!({}))
+                        .await?;
+
+                    return Err(e);
+                }
+            }
             MsgType::Register => self.handle_register(&msg).await?,
             _ => {}
         }
@@ -261,7 +268,6 @@ impl Session {
                 .map_err(|e| anyhow!("Password verification failed: {}", e))?;
 
             self.user_id = Some(id);
-            println!("Email {} logged in successfully", email);
         } else {
             return Err(anyhow!("Email not found or inactive"));
         }
@@ -314,8 +320,6 @@ impl Session {
             &role_password,
             &database,
         )?;
-
-        // send_private_message(self.ws_writer.clone(), MsgType::LoginFailed, json!({})).await?;
 
         // Initialize connection pool
         let pool = self.dbhub.init_pool(&role_url, &database, &role).await?;
