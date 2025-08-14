@@ -35,6 +35,7 @@ YTX Server is a Rust-based backend server that provides WebSocket communication,
     - Copy `env_template.text` to `.env` and fill in your values.
     - Example variables:
 
+        ```env
         BASE_POSTGRES_URL=postgres://localhost:5432
         VAULT_ADDR=<http://127.0.0.1:8200>
         VAULT_TOKEN=your-vault-token
@@ -42,6 +43,7 @@ YTX Server is a Rust-based backend server that provides WebSocket communication,
         AUTH_DB=ytx_auth
         AUTH_READWRITE_ROLE=ytx_auth_readwrite
         AUTH_READWRITE_PASSWORD=your-password
+        ```
 
 3. **Build the project:**
 
