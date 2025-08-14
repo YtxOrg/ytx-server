@@ -154,6 +154,7 @@ impl Session {
             MsgType::UpdateEntrySupportNode => self.handle_update_entry_support_node(&msg).await?,
             MsgType::UpdateEntryRate => self.handle_update_entry_value(&msg).await?,
             MsgType::UpdateEntryNumeric => self.handle_update_entry_value(&msg).await?,
+            MsgType::SearchEntry => self.handle_search_entry(&msg).await?,
 
             // Update global config
             MsgType::UpdateDefaultUnit => self.handle_update_default_unit(&msg).await?,
@@ -1426,6 +1427,62 @@ impl Session {
             "[{}] End handle_entry_insert",
             Local::now().format("%Y-%m-%d %H:%M:%S")
         );
+        Ok(())
+    }
+
+    async fn handle_search_entry(&self, msg: &Msg) -> Result<()> {
+        println!(
+            "[{}] Start handle_search_entry",
+            Local::now().format("%Y-%m-%d %H:%M:%S")
+        );
+
+        let pool = self
+            .pgpool
+            .as_ref()
+            .ok_or(anyhow!("pgpool not initialized"))?;
+
+        let mut value: SearchEntry =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse SearchEntry")?;
+
+        let section = &value.section;
+        let keyword = &value.keyword;
+
+        if keyword.trim().is_empty() {
+            println!(
+                "[{}] skipped: keyword is empty",
+                Local::now().format("%Y-%m-%d %H:%M:%S")
+            );
+            return Ok(());
+        }
+
+        validate_section(section)?;
+
+        let entry_table = format!("{}_entry", section);
+
+        let sql = format!("SELECT * FROM {} WHERE description ILIKE $1", entry_table);
+
+        let rows = sqlx::query(&sql)
+            .bind(format!("%{}%", keyword))
+            .fetch_all(pool)
+            .await
+            .with_context(|| format!("Failed to query table '{}'", entry_table))?;
+
+        if rows.is_empty() {
+            println!(
+                "skipped: No entry rows found for section {}, keyword {}",
+                section, keyword
+            );
+            return Ok(());
+        }
+
+        value.entry_list = pg_to_json_rows(&rows)?;
+        send_private_message(self.ws_writer.clone(), msg.msg_type.clone(), json!(value)).await?;
+
+        println!(
+            "[{}] End handle_search_entry",
+            Local::now().format("%Y-%m-%d %H:%M:%S")
+        );
+
         Ok(())
     }
 

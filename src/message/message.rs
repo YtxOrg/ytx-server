@@ -25,6 +25,7 @@ pub enum MsgType {
     NodeInsert,
     NodeDrag,
     EntryInsert,
+    SearchEntry,
     NodeUpdate,
     EntryUpdate,
     UpdateEntryRhsNode,
@@ -114,6 +115,14 @@ message_struct! {
         pub entry_id :Uuid,
         pub lhs_delta: Option<HashMap<String, Value>>,
         pub rhs_delta: Option<HashMap<String, Value>>,
+    }
+}
+
+message_struct! {
+    pub struct SearchEntry {
+        pub section: String,
+        pub keyword : String,
+        pub entry_list: Value,
     }
 }
 
