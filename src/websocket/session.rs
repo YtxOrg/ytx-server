@@ -115,7 +115,20 @@ impl Session {
                     return Err(e);
                 }
             }
-            MsgType::Register => self.handle_register(&msg).await?,
+
+            MsgType::Register => {
+                if let Err(e) = self.handle_register(&msg).await {
+                    send_private_message(
+                        self.ws_writer.clone(),
+                        MsgType::RegisterResult,
+                        json!({"result": false}),
+                    )
+                    .await?;
+
+                    return Err(e);
+                }
+            }
+
             _ => {}
         }
 
@@ -227,6 +240,13 @@ impl Session {
         .execute(auth_pool)
         .await?;
 
+        send_private_message(
+            self.ws_writer.clone(),
+            MsgType::RegisterResult,
+            json!({"result": true,}),
+        )
+        .await?;
+
         println!(
             "[{}] User registration successful",
             Local::now().format("%Y-%m-%d %H:%M:%S")
@@ -251,30 +271,62 @@ impl Session {
 
         let auth_pool = &self.dbhub.auth_pool;
 
-        let row = sqlx::query(
+        // ================================
+        // Email verification and password check
+        // Query the user to ensure they exist and are active
+        // ================================
+        let user_row = sqlx::query(
             "SELECT id, password_hash FROM ytx_user WHERE email = $1 AND is_valid = TRUE",
         )
         .bind(email)
         .fetch_optional(auth_pool)
         .await?;
 
-        if let Some(row) = row {
-            let id: uuid::Uuid = row.try_get("id")?;
-            let password_hash: String = row.try_get("password_hash")?;
-            let parsed_hash = PasswordHash::new(&password_hash)
-                .map_err(|e| anyhow!("Failed to parse password hash: {}", e))?;
+        let user_row = user_row.ok_or_else(|| anyhow!("Email not found or inactive"))?;
 
-            Argon2::default()
-                .verify_password(password.as_bytes(), &parsed_hash)
-                .map_err(|e| anyhow!("Password verification failed: {}", e))?;
+        let user_id: uuid::Uuid = user_row
+            .try_get("id")
+            .with_context(|| "Failed to get 'id' from user row")?;
 
-            self.user_id = Some(id);
-        } else {
-            return Err(anyhow!("Email not found or inactive"));
-        }
+        let password_hash: String = user_row
+            .try_get("password_hash")
+            .with_context(|| "Failed to get 'password_hash' from user row")?;
 
-        let user_id = self.user_id.ok_or_else(|| anyhow!("User ID not set"))?;
+        let parsed_hash = PasswordHash::new(&password_hash)
+            .map_err(|e| anyhow!("Failed to parse password hash: {}", e))?;
 
+        Argon2::default()
+            .verify_password(password.as_bytes(), &parsed_hash)
+            .map_err(|e| anyhow!("Password verification failed: {}", e))?;
+
+        // ================================
+        // Workspace database verification
+        // ================================
+        let row = sqlx::query(
+            r#"
+            SELECT database
+            FROM ytx_workspace_database
+            WHERE workspace = $1 AND is_valid = TRUE
+        "#,
+        )
+        .bind(workspace)
+        .fetch_optional(auth_pool)
+        .await?;
+
+        // If no database row found, return error
+        let row = match row {
+            Some(row) => row,
+            None => return Err(anyhow!("Workspace database not found or inactive")),
+        };
+
+        // Extract the database name
+        let database: String = row
+            .try_get("database")
+            .with_context(|| "Failed to get 'database' from workspace row")?;
+
+        // ================================
+        // Check workspace role for the user
+        // ================================
         let row = sqlx::query(
             r#"
                 SELECT role
@@ -287,31 +339,27 @@ impl Session {
         .fetch_optional(auth_pool)
         .await?;
 
-        let role: String = if let Some(row) = row {
-            row.try_get("role")
-                .with_context(|| format!("Failed to get 'role' from workspace row"))?
-        } else {
-            self.apply_workspace_permission(user_id, workspace).await?;
-            return Err(anyhow!("Workspace access pending approval"));
+        // If no role row found, apply workspace permission and return error
+        let row = match row {
+            Some(row) => row,
+            None => {
+                self.apply_workspace_permission(user_id, workspace).await?;
+
+                send_private_message(
+                    self.ws_writer.clone(),
+                    MsgType::WorkspacePermissionRequested,
+                    json!({"workspace": workspace,"email": email,}),
+                )
+                .await?;
+
+                return Ok(());
+            }
         };
 
-        let row = sqlx::query(
-            r#"
-                SELECT database
-                FROM ytx_workspace_database
-                WHERE workspace = $1 AND is_valid = TRUE
-         "#,
-        )
-        .bind(workspace)
-        .fetch_optional(auth_pool)
-        .await?;
-
-        let database: String = if let Some(row) = row {
-            row.try_get("database")
-                .with_context(|| format!("Failed to get 'database' from workspace row"))?
-        } else {
-            return Err(anyhow!("Workspace database not found or inactive"));
-        };
+        // Extract role from the row
+        let role: String = row
+            .try_get("role")
+            .with_context(|| "Failed to get 'role' from workspace row")?;
 
         let role_password: String = self.dbhub.get_role_password(&role).await?;
 
@@ -324,8 +372,6 @@ impl Session {
 
         // Initialize connection pool
         let pool = self.dbhub.init_pool(&role_url, &database, &role).await?;
-
-        self.pgpool = Some(pool.clone());
 
         self.start_broadcast(&database, &role).await?;
         self.push_global_config().await?;
@@ -341,6 +387,9 @@ impl Session {
         .await?;
 
         self.push_tree().await?;
+
+        self.pgpool = Some(pool.clone());
+        self.user_id = Some(user_id);
 
         Ok(())
     }
@@ -1368,7 +1417,7 @@ impl Session {
             return Ok(());
         }
 
-        value.entry = pg_to_json_rows(&rows)?;
+        value.entry_array = pg_to_json_rows(&rows)?;
         send_private_message(self.ws_writer.clone(), msg.msg_type.clone(), json!(value)).await?;
 
         println!(
@@ -1475,7 +1524,7 @@ impl Session {
             return Ok(());
         }
 
-        value.entry_list = pg_to_json_rows(&rows)?;
+        value.entry_array = pg_to_json_rows(&rows)?;
         send_private_message(self.ws_writer.clone(), msg.msg_type.clone(), json!(value)).await?;
 
         println!(
@@ -1735,13 +1784,13 @@ impl Session {
             .execute(tx.as_mut())
             .await?;
 
-        if let Some(lhs) = &mut value.lhs_node {
+        if let Some(lhs) = &mut value.lhs_delta {
             lhs.insert(UPDATED_BY.to_string(), Value::String(user_id.to_string()));
             lhs.insert(UPDATED_TIME.to_string(), Value::String(now_str.clone()));
             update_node_total(section, lhs, tx.as_mut()).await?;
         }
 
-        if let Some(rhs) = &mut value.rhs_node {
+        if let Some(rhs) = &mut value.rhs_delta {
             rhs.insert(UPDATED_BY.to_string(), Value::String(user_id.to_string()));
             rhs.insert(UPDATED_TIME.to_string(), Value::String(now_str));
             update_node_total(section, rhs, tx.as_mut()).await?;

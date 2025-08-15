@@ -19,6 +19,8 @@ macro_rules! message_struct {
 #[serde(rename_all = "snake_case")]
 pub enum MsgType {
     Register,
+    RegisterResult,
+    WorkspacePermissionRequested,
     Login,
     LoginFailed,
     LoginSuccess,
@@ -68,7 +70,7 @@ message_struct! {
         pub section: String,
         pub node_id : Uuid,
         pub kind: i32,
-        pub entry : Value,
+        pub entry_array : Value,
     }
 }
 
@@ -122,7 +124,7 @@ message_struct! {
     pub struct SearchEntry {
         pub section: String,
         pub keyword : String,
-        pub entry_list: Value,
+        pub entry_array: Value,
     }
 }
 
@@ -168,8 +170,8 @@ message_struct! {
         pub section: String,
         pub session_id : String,
         pub entry_id :Uuid,
-        pub lhs_node: Option<HashMap<String, Value>>,
-        pub rhs_node: Option<HashMap<String, Value>>,
+        pub lhs_delta: Option<HashMap<String, Value>>,
+        pub rhs_delta: Option<HashMap<String, Value>>,
     }
 }
 
