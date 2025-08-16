@@ -332,7 +332,7 @@ impl Session {
             r#"
                 SELECT role
                 FROM ytx_role_workspace
-                WHERE user_id = $1 AND workspace = $2 AND is_valid = TRUE
+                WHERE user_id = $1 AND workspace = $2 AND is_valid = TRUE AND is_access_enabled = TRUE
                 "#,
         )
         .bind(user_id)
@@ -340,15 +340,15 @@ impl Session {
         .fetch_optional(auth_pool)
         .await?;
 
-        // If no role row found, apply workspace permission and return error
+        // If no role row found, apply workspace access and return ok
         let row = match row {
             Some(row) => row,
             None => {
-                self.apply_workspace_permission(user_id, workspace).await?;
+                self.apply_workspace_access(user_id, workspace).await?;
 
                 send_private_message(
                     self.ws_writer.clone(),
-                    MsgType::WorkspacePermissionRequested,
+                    MsgType::WorkspaceAccessPending,
                     json!({"workspace": workspace,"email": email,}),
                 )
                 .await?;
@@ -397,7 +397,7 @@ impl Session {
 }
 
 impl Session {
-    async fn apply_workspace_permission(&self, user_id: Uuid, workspace: &str) -> Result<()> {
+    async fn apply_workspace_access(&self, user_id: Uuid, workspace: &str) -> Result<()> {
         let auth_pool = &self.dbhub.auth_pool;
 
         dotenv().ok();
@@ -405,7 +405,7 @@ impl Session {
 
         sqlx::query(
             r#"
-            INSERT INTO ytx_role_workspace (user_id, workspace, role, is_valid, register_time)
+            INSERT INTO ytx_role_workspace (user_id, workspace, role, is_access_enabled, register_time)
             VALUES ($1, $2, $3, FALSE, now())
             ON CONFLICT (user_id, workspace) DO NOTHING
             "#,

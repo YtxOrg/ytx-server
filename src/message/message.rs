@@ -20,7 +20,7 @@ macro_rules! message_struct {
 pub enum MsgType {
     Register,
     RegisterResult,
-    WorkspacePermissionRequested,
+    WorkspaceAccessPending,
     FetchOneNode,
     Login,
     LoginFailed,
