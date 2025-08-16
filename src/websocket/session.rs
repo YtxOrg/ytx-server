@@ -179,6 +179,7 @@ impl Session {
             // Fetch data
             MsgType::FetchTable => self.handle_fetch_table(&msg).await?,
             MsgType::FetchTree => self.handle_fetch_tree(&msg).await?,
+            MsgType::FetchOneNode => self.handle_fetch_one_node(&msg).await?,
 
             // Action check
             MsgType::CheckAction => self.handle_check_action(&msg).await?,
@@ -374,7 +375,7 @@ impl Session {
         let pool = self.dbhub.init_pool(&role_url, &database, &role).await?;
 
         self.start_broadcast(&database, &role).await?;
-        self.push_global_config().await?;
+        self.push_global_config(pool.clone()).await?;
 
         // Send login success message with session ID
         send_private_message(
@@ -386,9 +387,9 @@ impl Session {
         )
         .await?;
 
-        self.push_tree().await?;
+        self.push_tree(pool.clone()).await?;
 
-        self.pgpool = Some(pool.clone());
+        self.pgpool = Some(pool);
         self.user_id = Some(user_id);
 
         Ok(())
@@ -418,13 +419,7 @@ impl Session {
         Ok(())
     }
 
-    async fn push_tree(&self) -> Result<()> {
-        let pool = self
-            .pgpool
-            .as_ref()
-            .ok_or_else(|| anyhow!("pgpool not initialized"))?
-            .clone();
-
+    async fn push_tree(&self, pool: PgPool) -> Result<()> {
         let writer = self.ws_writer.clone();
 
         let tasks = SECTIONS.iter().map(|section| {
@@ -485,13 +480,7 @@ impl Session {
         Ok(())
     }
 
-    async fn push_global_config(&self) -> Result<()> {
-        let pool = self
-            .pgpool
-            .as_ref()
-            .ok_or(anyhow!("pgpool not initialized"))?
-            .clone();
-
+    async fn push_global_config(&self, pool: PgPool) -> Result<()> {
         let writer = self.ws_writer.clone();
 
         let rows = sqlx::query(r#"SELECT section, default_unit, document_dir FROM global_config"#)
@@ -686,7 +675,6 @@ impl Session {
             from_value(msg.value.clone()).with_context(|| "Failed to parse FetchTree")?;
 
         let section = &value.section;
-        validate_section(section)?;
 
         match section.as_str() {
             TASK | SALE | PURCHASE => {}
@@ -750,6 +738,56 @@ impl Session {
             "[{}] handle_fetch_tree: successful.",
             Local::now().format("%Y-%m-%d %H:%M:%S")
         );
+        Ok(())
+    }
+
+    async fn handle_fetch_one_node(&self, msg: &Msg) -> Result<()> {
+        let pool = self
+            .pgpool
+            .as_ref()
+            .ok_or(anyhow!("pgpool not initialized"))?;
+
+        let mut value: FetchOneNode =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse FetchOneNode")?;
+
+        let section = &value.section;
+        let node_id = &value.node_id;
+
+        match section.as_str() {
+            TASK | SALE | PURCHASE => {}
+            _ => return Err(anyhow!("Invalid section: '{}'", section)),
+        }
+
+        let node_table = format!("{}_node", section);
+        let node_sql = format!(
+            "SELECT * FROM {} WHERE id = $1 AND is_valid = TRUE",
+            node_table
+        );
+
+        let node_row = sqlx::query(&node_sql).bind(node_id).fetch_one(pool).await?;
+
+        let path_table = format!("{}_path", section);
+        let path_sql = format!(
+            "SELECT ancestor FROM {} WHERE descendant = $1 AND is_valid = TRUE",
+            path_table
+        );
+
+        let path_row = sqlx::query(&path_sql)
+            .bind(node_id)
+            .fetch_one(pool)
+            .await
+            .with_context(|| format!("Query failed for table '{}'", path_table))?;
+
+        value.ancestor = path_row.try_get("ancestor")?;
+        value.node = pg_to_json_row(&node_row)?;
+
+        send_private_message(self.ws_writer.clone(), msg.msg_type.clone(), json!(value)).await?;
+
+        println!(
+            "[{}] FetchOneNode: successful.",
+            Local::now().format("%Y-%m-%d %H:%M:%S")
+        );
+
         Ok(())
     }
 
@@ -1888,59 +1926,63 @@ fn pg_to_json_rows(rows: &[PgRow]) -> Result<Value> {
     let mut result = Vec::new();
 
     for row in rows {
-        let mut obj = Map::new();
-
-        for column in row.columns() {
-            let name = column.name().to_string();
-            let type_name = column.type_info().name();
-
-            let value = match type_name {
-                // String types
-                "TEXT" => row
-                    .try_get::<Option<&str>, _>(name.as_str())
-                    .map(|opt| opt.map(|s| Value::String(s.to_string()))),
-
-                // UUID
-                "UUID" => row
-                    .try_get::<Option<Uuid>, _>(name.as_str())
-                    .map(|opt| opt.map(|u| Value::String(u.to_string()))),
-
-                // Integer types
-                "INT4" => row
-                    .try_get::<Option<i32>, _>(name.as_str())
-                    .map(|opt| opt.map(|v| Value::Number(v.into()))),
-
-                "INT8" => row
-                    .try_get::<Option<i64>, _>(name.as_str())
-                    .map(|opt| opt.map(|v| Value::Number(Number::from(v)))),
-
-                // NUMERIC types
-                "NUMERIC" => row
-                    .try_get::<Option<Decimal>, _>(name.as_str())
-                    .map(|opt| opt.map(|d| Value::String(d.to_string()))),
-
-                // Boolean
-                "BOOL" => row
-                    .try_get::<Option<bool>, _>(name.as_str())
-                    .map(|opt| opt.map(Value::Bool)),
-
-                // Timestamps
-                "TIMESTAMPTZ" => row
-                    .try_get::<Option<DateTime<Utc>>, _>(name.as_str())
-                    .map(|opt| opt.map(|dt| Value::String(dt.to_rfc3339()))),
-
-                // Fallback: just null
-                _ => Ok(Some(Value::Null)),
-            }
-            .unwrap_or(Some(Value::Null));
-
-            obj.insert(name, value.unwrap_or(Value::Null));
-        }
-
-        result.push(Value::Object(obj));
+        result.push(pg_to_json_row(row)?);
     }
 
     Ok(Value::Array(result))
+}
+
+fn pg_to_json_row(row: &PgRow) -> Result<Value> {
+    let mut obj = Map::new();
+
+    for column in row.columns() {
+        let name = column.name().to_string();
+        let type_name = column.type_info().name();
+
+        let value = match type_name {
+            // String types
+            "TEXT" => row
+                .try_get::<Option<&str>, _>(name.as_str())
+                .map(|opt| opt.map(|s| Value::String(s.to_string()))),
+
+            // UUID
+            "UUID" => row
+                .try_get::<Option<Uuid>, _>(name.as_str())
+                .map(|opt| opt.map(|u| Value::String(u.to_string()))),
+
+            // Integer types
+            "INT4" => row
+                .try_get::<Option<i32>, _>(name.as_str())
+                .map(|opt| opt.map(|v| Value::Number(v.into()))),
+
+            "INT8" => row
+                .try_get::<Option<i64>, _>(name.as_str())
+                .map(|opt| opt.map(|v| Value::Number(Number::from(v)))),
+
+            // NUMERIC types
+            "NUMERIC" => row
+                .try_get::<Option<Decimal>, _>(name.as_str())
+                .map(|opt| opt.map(|d| Value::String(d.to_string()))),
+
+            // Boolean
+            "BOOL" => row
+                .try_get::<Option<bool>, _>(name.as_str())
+                .map(|opt| opt.map(Value::Bool)),
+
+            // Timestamps
+            "TIMESTAMPTZ" => row
+                .try_get::<Option<DateTime<Utc>>, _>(name.as_str())
+                .map(|opt| opt.map(|dt| Value::String(dt.to_rfc3339()))),
+
+            // Fallback: just null
+            _ => Ok(Some(Value::Null)),
+        }
+        .unwrap_or(Some(Value::Null));
+
+        obj.insert(name, value.unwrap_or(Value::Null));
+    }
+
+    Ok(Value::Object(obj))
 }
 
 fn json_to_pg_bind<'q>(

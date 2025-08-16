@@ -21,6 +21,7 @@ pub enum MsgType {
     Register,
     RegisterResult,
     WorkspacePermissionRequested,
+    FetchOneNode,
     Login,
     LoginFailed,
     LoginSuccess,
@@ -187,6 +188,15 @@ message_struct! {
         pub section: String,
         pub start: DateTime<Utc>,
         pub end: DateTime<Utc>,
+    }
+}
+
+message_struct! {
+    pub struct FetchOneNode {
+        pub section: String,
+        pub node_id: Uuid,
+        pub node: Value,
+        pub ancestor: Uuid,
     }
 }
 
