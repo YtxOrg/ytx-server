@@ -706,8 +706,10 @@ impl SqlGen for Task {
             r#"
             SELECT * FROM {section}_node
             WHERE is_valid = TRUE
-              AND issued_time >= TIMESTAMPTZ '{start}'
-              AND issued_time < TIMESTAMPTZ '{end}'
+            AND (
+                    (issued_time >= TIMESTAMPTZ '{start}' AND issued_time < TIMESTAMPTZ '{end}')
+                    OR kind = 0
+                )
             "#
         )
     }
@@ -716,7 +718,7 @@ impl SqlGen for Task {
         Some(format!(
             r#"
             SELECT * FROM {section}_node
-            WHERE issued_time >= $1 AND issued_time < $2 AND is_valid = TRUE
+            WHERE issued_time >= $1 AND issued_time < $2 AND is_valid = TRUE AND kind != 0
             "#,
         ))
     }
