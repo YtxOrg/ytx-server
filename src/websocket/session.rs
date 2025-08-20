@@ -836,6 +836,7 @@ impl Session {
         let mut value: DirectionRule =
             from_value(msg.value.clone()).with_context(|| "Failed to parse UpdateNodeRule")?;
 
+        value.session_id = self.session_id.to_string();
         let section = &value.section;
 
         let sql_gen = self

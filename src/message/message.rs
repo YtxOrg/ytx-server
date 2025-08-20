@@ -220,6 +220,7 @@ message_struct! {
 message_struct! {
     pub struct DirectionRule {
         pub section: String,
+        pub session_id : String,
         pub id: Uuid,
         pub direction_rule: bool,
         pub meta: HashMap<String, Value>,
