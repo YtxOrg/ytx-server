@@ -115,11 +115,11 @@ impl Session {
         let msg: Msg = serde_json::from_str(&text)?;
         let msg_type = msg.msg_type.clone();
 
-        info!("Handling message: {:?}", msg_type);
+        info!("Handling: {:?}", msg_type);
 
         match msg.msg_type {
             MsgType::Login => {
-                if let Err(e) = self.handle_login(&msg).await {
+                if let Err(e) = self.login(&msg).await {
                     send_private_message(self.ws_writer.clone(), MsgType::LoginFailed, json!({}))
                         .await?;
 
@@ -128,7 +128,7 @@ impl Session {
             }
 
             MsgType::Register => {
-                if let Err(e) = self.handle_register(&msg).await {
+                if let Err(e) = self.register(&msg).await {
                     send_private_message(
                         self.ws_writer.clone(),
                         MsgType::RegisterResult,
@@ -148,64 +148,57 @@ impl Session {
         }
 
         match msg.msg_type {
-            // Node insertion and movement
-            MsgType::NodeInsert => self.handle_node_insert(&msg).await?,
-            MsgType::NodeDrag => self.handle_node_drag(&msg).await?,
-            MsgType::NodeUpdate => self.handle_node_update(&msg).await?,
+            // Node
+            MsgType::NodeInsert => self.insert_node(&msg).await?,
+            MsgType::NodeDrag => self.drag_node(&msg).await?,
 
-            // Node update
-            MsgType::UpdateNodeRule => self.handle_update_node_rule(&msg).await?,
-            MsgType::UpdateNodeName => self.handle_node_update(&msg).await?,
+            MsgType::NodeUpdate | MsgType::Name => self.update_node(&msg).await?,
+            MsgType::DirectionRule => self.update_direction_rule(&msg).await?,
 
             // Node removal and replacement
-            MsgType::LeafRemove => self.handle_leaf_remove(&msg).await?,
-            MsgType::BranchRemove => self.handle_branch_remove(&msg).await?,
-            MsgType::SupportRemove => self.handle_support_remove(&msg).await?,
-            MsgType::LeafReplace => self.handle_leaf_replace(&msg).await?,
-            MsgType::SupportReplace => self.handle_support_replace(&msg).await?,
+            MsgType::LeafRemove => self.remove_leaf(&msg).await?,
+            MsgType::BranchRemove => self.remove_branch(&msg).await?,
+            MsgType::SupportRemove => self.remove_support(&msg).await?,
+            MsgType::LeafReplace => self.replace_leaf(&msg).await?,
+            MsgType::SupportReplace => self.replace_support(&msg).await?,
 
-            // Node pre-checks before removal
-            MsgType::LeafCheckBeforeRemove => self.handle_leaf_check_before_remove(&msg).await?,
-            MsgType::SupportCheckBeforeRemove => {
-                self.handle_support_check_before_remove(&msg).await?
-            }
+            // Node reference pre-checks before removal
+            MsgType::LeafReference => self.check_and_remove_leaf(&msg).await?,
+            MsgType::SupportReference => self.check_and_remove_support(&msg).await?,
 
             // Entry operations
-            MsgType::EntryInsert => self.handle_entry_insert(&msg).await?,
-            MsgType::EntryUpdate => self.handle_entry_update(&msg).await?,
-            MsgType::EntryRemove => self.handle_entry_remove(&msg).await?,
-            MsgType::UpdateEntryRhsNode => self.handle_update_entry_rhs_node(&msg).await?,
-            MsgType::UpdateEntrySupportNode => self.handle_update_entry_support_node(&msg).await?,
-            MsgType::UpdateEntryRate => self.handle_update_entry_value(&msg).await?,
-            MsgType::UpdateEntryNumeric => self.handle_update_entry_value(&msg).await?,
-            MsgType::SearchEntry => self.handle_search_entry(&msg).await?,
+            MsgType::EntryInsert => self.insert_entry(&msg).await?,
+            MsgType::EntryUpdate => self.update_entry(&msg).await?,
+            MsgType::EntryRemove => self.remove_entry(&msg).await?,
+            MsgType::EntrySearch => self.search_entry(&msg).await?,
+
+            MsgType::EntryRhsNode => self.update_entry_rhs_node(&msg).await?,
+            MsgType::EntrySupportNode => self.update_entry_support_node(&msg).await?,
+            MsgType::EntryRate => self.update_entry_value(&msg).await?,
+            MsgType::EntryNumeric => self.update_entry_value(&msg).await?,
 
             // Update global config
-            MsgType::UpdateDefaultUnit => self.handle_update_default_unit(&msg).await?,
-            MsgType::UpdateDocumentDir => self.handle_update_document_dir(&msg).await?,
+            MsgType::DefaultUnit => self.update_default_unit(&msg).await?,
+            MsgType::DocumentDir => self.update_document_dir(&msg).await?,
 
-            // Settlement operations
-            MsgType::UpdateSettlement => self.handle_update_settlement(&msg).await?,
-
-            // Fetch data
-            MsgType::EntryData => self.handle_entry_data(&msg).await?,
-            MsgType::NodeDataAcked => self.handle_node_data_acked(&msg).await?,
-            MsgType::OneNode => self.handle_one_node(&msg).await?,
+            MsgType::TableAcked => self.push_table_acked(&msg).await?,
+            MsgType::TreeAcked => self.push_tree_acked(&msg).await?,
+            MsgType::OneNode => self.push_one_node(&msg).await?,
 
             // Action check
-            MsgType::CheckAction => self.handle_check_action(&msg).await?,
+            MsgType::CheckAction => self.check_action(&msg).await?,
 
             // Unknown or unhandled message types
             _ => {}
         }
 
-        info!("Successfully handled message: {:?}", msg_type);
+        info!("Successfully.");
         return Ok(());
     }
 }
 
 impl Session {
-    async fn handle_register(&mut self, msg: &Msg) -> Result<()> {
+    async fn register(&mut self, msg: &Msg) -> Result<()> {
         let value: RegisterInfo =
             from_value(msg.value.clone()).with_context(|| "Failed to parse RegisterInfo")?;
 
@@ -263,7 +256,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_login(&mut self, msg: &Msg) -> Result<()> {
+    async fn login(&mut self, msg: &Msg) -> Result<()> {
         // Check if already logged in
         if self.user_id.is_some() {
             return Ok(());
@@ -398,8 +391,8 @@ impl Session {
         )
         .await?;
 
-        self.push_node_data(pool.clone()).await?;
-        info!("Push node data successfully.");
+        self.push_tree_applied(pool.clone()).await?;
+        info!("Push tree data successfully.");
 
         self.pgpool = Some(pool);
         self.user_id = Some(user_id);
@@ -431,7 +424,7 @@ impl Session {
         Ok(())
     }
 
-    async fn push_node_data(&self, pool: PgPool) -> Result<()> {
+    async fn push_tree_applied(&self, pool: PgPool) -> Result<()> {
         let writer = self.ws_writer.clone();
 
         let tasks = SECTIONS.iter().map(|section| {
@@ -447,7 +440,7 @@ impl Session {
                 let mut section_obj = serde_json::Map::new();
                 section_obj.insert(SECTION.into(), Value::String(section.clone()));
 
-                let node_sql = sql_gen.select_node(&section);
+                let node_sql = sql_gen.fetch_tree_applied(&section);
                 let node_rows = sqlx::query(&node_sql).fetch_all(&pool).await?;
 
                 if node_rows.is_empty() {
@@ -471,7 +464,7 @@ impl Session {
                 let path_array = pg_to_json_rows(&path_rows)?;
                 section_obj.insert(PATH.into(), path_array);
 
-                send_private_message(writer, MsgType::NodeDataApplied, Value::Object(section_obj))
+                send_private_message(writer, MsgType::TreeApplied, Value::Object(section_obj))
                     .await?;
                 Ok(())
             }
@@ -513,11 +506,11 @@ impl Session {
 }
 
 impl Session {
-    async fn handle_update_document_dir(&self, msg: &Msg) -> Result<()> {
+    async fn update_document_dir(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: UpdateDocumentDir =
-            from_value(msg.value.clone()).with_context(|| "Failed to parse UpdateDocumentDir")?;
+        let mut value: DocumentDir =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse DocumentDir")?;
 
         value.session_id = self.session_id.to_string();
 
@@ -535,11 +528,11 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_update_default_unit(&self, msg: &Msg) -> Result<()> {
+    async fn update_default_unit(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let value: UpdateDefaultUnit =
-            from_value(msg.value.clone()).with_context(|| "Failed to parse UpdateDefaultUnit")?;
+        let value: DefaultUnit =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse DefaultUnit")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -652,13 +645,13 @@ impl Session {
 }
 
 impl Session {
-    async fn handle_node_data_acked(&self, msg: &Msg) -> Result<()> {
+    async fn push_tree_acked(&self, msg: &Msg) -> Result<()> {
         let pool = self
             .pgpool
             .as_ref()
             .ok_or(anyhow!("pgpool not initialized"))?;
 
-        let value: NodeData =
+        let value: TreeAcked =
             from_value(msg.value.clone()).with_context(|| "Failed to parse NodeData")?;
 
         let section = &value.section;
@@ -677,7 +670,7 @@ impl Session {
             .ok_or_else(|| anyhow!("No SqlGen implementation found for section: '{}'", section))?;
 
         let sql = sql_gen
-            .fetch_tree(section)
+            .fetch_tree_acked(section)
             .ok_or_else(|| anyhow!("fetch_tree returned None for section: '{}'", section))?;
 
         let node_rows = sqlx::query(&sql)
@@ -716,7 +709,7 @@ impl Session {
 
         send_private_message(
             self.ws_writer.clone(),
-            MsgType::NodeDataAcked,
+            MsgType::TreeAcked,
             Value::Object(obj),
         )
         .await?;
@@ -724,7 +717,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_one_node(&self, msg: &Msg) -> Result<()> {
+    async fn push_one_node(&self, msg: &Msg) -> Result<()> {
         let pool = self
             .pgpool
             .as_ref()
@@ -769,7 +762,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_node_insert(&self, msg: &Msg) -> Result<()> {
+    async fn insert_node(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
         let mut value: NodeInsert =
@@ -815,7 +808,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_node_update(&self, msg: &Msg) -> Result<()> {
+    async fn update_node(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
         let mut value: Update =
@@ -837,13 +830,11 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_update_node_rule(&self, msg: &Msg) -> Result<()> {
+    async fn update_direction_rule(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: UpdateNodeRule =
+        let mut value: DirectionRule =
             from_value(msg.value.clone()).with_context(|| "Failed to parse UpdateNodeRule")?;
-
-        value.session_id = self.session_id.to_string();
 
         let section = &value.section;
 
@@ -852,7 +843,7 @@ impl Session {
             .get(section)
             .ok_or_else(|| anyhow!("No SqlGen found for section: {}", section))?;
 
-        let sql: String = sql_gen.update_node_direction_rule(section);
+        let sql: String = sql_gen.update_direction_rule(section);
 
         let now = Utc::now();
         let meta = &mut value.meta;
@@ -873,7 +864,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_node_drag(&self, msg: &Msg) -> Result<()> {
+    async fn drag_node(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
         let mut value: NodeDrag =
@@ -918,7 +909,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_leaf_remove(&self, msg: &Msg) -> Result<()> {
+    async fn remove_leaf(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
         let mut value: LeafRemove =
@@ -941,7 +932,7 @@ impl Session {
 
         let mut delta_hash: HashMap<Uuid, (Decimal, Decimal)> = HashMap::new();
 
-        if let Some(sql) = sql_gen.collect_leaf_entry(section) {
+        if let Some(sql) = sql_gen.fetch_leaf_entry_refs(section) {
             let rows = sqlx::query(&sql).bind(id).fetch_all(pool).await?;
 
             for row in rows {
@@ -1041,11 +1032,11 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_support_check_before_remove(&self, msg: &Msg) -> Result<()> {
+    async fn check_and_remove_support(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let value: SupportCheckBeforeRemove = from_value(msg.value.clone())
-            .with_context(|| "Failed to parse SupportCheckBeforeRemove")?;
+        let value: SupportReference =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse SupportReference")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1086,11 +1077,11 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_leaf_check_before_remove(&self, msg: &Msg) -> Result<()> {
+    async fn check_and_remove_leaf(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: LeafCheckBeforeRemove = from_value(msg.value.clone())
-            .with_context(|| "Failed to parse LeafCheckBeforeRemove")?;
+        let mut value: LeafReference =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse LeafReference")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1131,7 +1122,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_branch_remove(&self, msg: &Msg) -> Result<()> {
+    async fn remove_branch(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
         let mut value: BranchRemove =
@@ -1165,7 +1156,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_support_remove(&self, msg: &Msg) -> Result<()> {
+    async fn remove_support(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
         let mut value: SupportRemove =
@@ -1205,7 +1196,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_support_replace(&self, msg: &Msg) -> Result<()> {
+    async fn replace_support(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
         let mut value: SupportReplace =
@@ -1246,7 +1237,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_leaf_replace(&self, msg: &Msg) -> Result<()> {
+    async fn replace_leaf(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
         let mut value: LeafReplace =
@@ -1345,13 +1336,13 @@ impl Session {
 }
 
 impl Session {
-    async fn handle_entry_data(&self, msg: &Msg) -> Result<()> {
+    async fn push_table_acked(&self, msg: &Msg) -> Result<()> {
         let pool = self
             .pgpool
             .as_ref()
             .ok_or(anyhow!("pgpool not initialized"))?;
 
-        let mut value: EntryData =
+        let mut value: TableAcked =
             from_value(msg.value.clone()).with_context(|| "Failed to parse EntryData")?;
 
         let section = &value.section;
@@ -1366,8 +1357,8 @@ impl Session {
             .ok_or_else(|| anyhow!("No SqlGen found for section: {}", section))?;
 
         let sql = match kind {
-            LEAF_NODE => Some(sql_gen.leaf_entry(section)),
-            SUPPORT_NODE => sql_gen.support_entry(section),
+            LEAF_NODE => Some(sql_gen.fetch_leaf_entry(section)),
+            SUPPORT_NODE => sql_gen.fetch_support_entry(section),
             _ => None,
         }
         .ok_or_else(|| anyhow!("No SQL statement for kind: {}", kind))?;
@@ -1388,7 +1379,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_entry_insert(&self, msg: &Msg) -> Result<()> {
+    async fn insert_entry(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
         let mut value: EntryInsert =
@@ -1431,7 +1422,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_search_entry(&self, msg: &Msg) -> Result<()> {
+    async fn search_entry(&self, msg: &Msg) -> Result<()> {
         let pool = self
             .pgpool
             .as_ref()
@@ -1474,7 +1465,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_entry_update(&self, msg: &Msg) -> Result<()> {
+    async fn update_entry(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
         let mut value: Update =
@@ -1501,11 +1492,11 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_update_entry_value(&self, msg: &Msg) -> Result<()> {
+    async fn update_entry_value(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: UpdateEntryValue =
-            from_value(msg.value.clone()).with_context(|| "Failed to parse UpdateEntryValue")?;
+        let mut value: EntryValue =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse EntryValue")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1545,11 +1536,11 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_update_entry_rhs_node(&self, msg: &Msg) -> Result<()> {
+    async fn update_entry_rhs_node(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: UpdateEntryRhsNode =
-            from_value(msg.value.clone()).with_context(|| "Failed to parse UpdateEntryRhsNode")?;
+        let mut value: EntryRhsNode =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse EntryRhsNode")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1605,11 +1596,11 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_update_entry_support_node(&self, msg: &Msg) -> Result<()> {
+    async fn update_entry_support_node(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
-        let mut value: UpdateEntrySupportNode = from_value(msg.value.clone())
-            .with_context(|| "Failed to parse UpdateEntrySupportNode")?;
+        let mut value: EntrySupportNode =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse EntrySupportNode")?;
 
         let section = &value.section;
         validate_section(section)?;
@@ -1649,7 +1640,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_entry_remove(&self, msg: &Msg) -> Result<()> {
+    async fn remove_entry(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
         let mut value: EntryRemove =
@@ -1697,7 +1688,7 @@ impl Session {
         Ok(())
     }
 
-    async fn handle_check_action(&self, msg: &Msg) -> Result<()> {
+    async fn check_action(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
         let mut value: CheckAction =
@@ -1716,7 +1707,7 @@ impl Session {
             .get(&section)
             .ok_or_else(|| anyhow!("No SqlGen for section: {}", section))?;
 
-        let sql = sql_gen.check_action(&section);
+        let sql = sql_gen.update_is_checked(&section);
 
         meta.insert(UPDATED_BY.to_string(), Value::String(user_id.to_string()));
         meta.insert(UPDATED_TIME.to_string(), Value::String(now.to_rfc3339()));

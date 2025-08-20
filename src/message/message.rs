@@ -28,33 +28,32 @@ pub enum MsgType {
     NodeInsert,
     NodeDrag,
     EntryInsert,
-    SearchEntry,
+    EntrySearch,
     NodeUpdate,
     EntryUpdate,
-    UpdateEntryRhsNode,
-    UpdateEntrySupportNode,
-    UpdateSettlement,
+    EntryRhsNode,
+    EntrySupportNode,
     LeafRemove,
     BranchRemove,
-    UpdateNodeRule,
+    DirectionRule,
     SupportRemove,
     SupportReplace,
     LeafReplace,
     EntryRemove,
-    NodeDataApplied,
+    TreeApplied,
     SessionId,
     GlobalConfig,
-    NodeDataAcked,
-    EntryData,
+    TreeAcked,
+    TableAcked,
     CheckAction,
-    UpdateDocumentDir,
-    UpdateDefaultUnit,
-    UpdateNodeName,
-    UpdateEntryRate,
-    UpdateEntryNumeric, // debit or credit
+    DocumentDir,
+    DefaultUnit,
+    Name,
+    EntryRate,
+    EntryNumeric, // debit or credit
     UpdateDefaultUnitFailed,
-    SupportCheckBeforeRemove,
-    LeafCheckBeforeRemove,
+    SupportReference,
+    LeafReference,
     UnreferencedNodeRemove,
     Other,
 }
@@ -67,7 +66,7 @@ message_struct! {
 }
 
 message_struct! {
-    pub struct EntryData {
+    pub struct TableAcked {
         pub section: String,
         pub node_id : Uuid,
         pub kind: i32,
@@ -130,7 +129,7 @@ message_struct! {
 }
 
 message_struct! {
-    pub struct UpdateEntryRhsNode {
+    pub struct EntryRhsNode {
         pub section: String,
         pub session_id : String,
         pub entry: HashMap<String, Value>,
@@ -144,7 +143,7 @@ message_struct! {
 }
 
 message_struct! {
-    pub struct UpdateEntryValue {
+    pub struct EntryValue {
         pub section: String,
         pub session_id : String,
         pub cache: HashMap<String, Value>,
@@ -156,7 +155,7 @@ message_struct! {
 }
 
 message_struct! {
-    pub struct UpdateEntrySupportNode {
+    pub struct EntrySupportNode {
         pub section: String,
         pub session_id : String,
         pub entry_id : Uuid,
@@ -177,14 +176,14 @@ message_struct! {
 }
 
 message_struct! {
-    pub struct SupportCheckBeforeRemove {
+    pub struct SupportReference {
         pub section: String,
         pub id : Uuid,
     }
 }
 
 message_struct! {
-    pub struct NodeData {
+    pub struct TreeAcked {
         pub section: String,
         pub start: DateTime<Utc>,
         pub end: DateTime<Utc>,
@@ -201,7 +200,7 @@ message_struct! {
 }
 
 message_struct! {
-    pub struct LeafCheckBeforeRemove {
+    pub struct LeafReference {
         pub section: String,
         pub id : Uuid,
         pub leaf_reference: bool,
@@ -219,9 +218,8 @@ message_struct! {
 }
 
 message_struct! {
-    pub struct UpdateNodeRule {
+    pub struct DirectionRule {
         pub section: String,
-        pub session_id : String,
         pub id: Uuid,
         pub direction_rule: bool,
         pub meta: HashMap<String, Value>,
@@ -229,7 +227,7 @@ message_struct! {
 }
 
 message_struct! {
-    pub struct UpdateDocumentDir {
+    pub struct DocumentDir {
         pub section: String,
         pub session_id : String,
         pub document_dir: String,
@@ -237,7 +235,7 @@ message_struct! {
 }
 
 message_struct! {
-    pub struct UpdateDefaultUnit {
+    pub struct DefaultUnit {
         pub section: String,
         pub default_unit: i32,
     }

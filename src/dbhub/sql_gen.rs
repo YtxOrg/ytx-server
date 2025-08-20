@@ -22,8 +22,12 @@ use crate::{constant::*, dbhub::section::*};
 use chrono::{Datelike, Duration, TimeZone, Utc};
 
 pub trait SqlGen: Send + Sync {
-    fn select_node(&self, section: &str) -> String {
+    fn fetch_tree_applied(&self, section: &str) -> String {
         format!("SELECT * FROM {}_node WHERE is_valid = TRUE", section)
+    }
+
+    fn fetch_tree_acked(&self, _section: &str) -> Option<String> {
+        None
     }
 
     fn remove_node(&self, section: &str) -> String {
@@ -45,7 +49,7 @@ pub trait SqlGen: Send + Sync {
         )
     }
 
-    fn leaf_entry(&self, section: &str) -> String {
+    fn fetch_leaf_entry(&self, section: &str) -> String {
         format!(
             r#"
             SELECT * FROM {section}_entry
@@ -69,7 +73,7 @@ pub trait SqlGen: Send + Sync {
         )
     }
 
-    fn check_action(&self, section: &str) -> String {
+    fn update_is_checked(&self, section: &str) -> String {
         format!(
             r#"
             UPDATE {}_entry
@@ -86,7 +90,7 @@ pub trait SqlGen: Send + Sync {
         )
     }
 
-    fn update_node_direction_rule(&self, section: &str) -> String {
+    fn update_direction_rule(&self, section: &str) -> String {
         format!(
             r#"
             UPDATE {section}_node
@@ -99,10 +103,6 @@ pub trait SqlGen: Send + Sync {
             WHERE id = $3 AND is_valid = TRUE
             "#,
         )
-    }
-
-    fn fetch_tree(&self, _section: &str) -> Option<String> {
-        None
     }
 
     /// Provides the SQL statement for replacing references to a leaf node (i.e., replacing old_id with new_id)
@@ -144,7 +144,7 @@ pub trait SqlGen: Send + Sync {
     ///
     /// Parameters:
     /// - `$1`: The leaf node ID to be removed.
-    fn collect_leaf_entry(&self, section: &str) -> Option<String> {
+    fn fetch_leaf_entry_refs(&self, section: &str) -> Option<String> {
         Some(format!(
             r#"
         SELECT rhs_node AS node_id, id AS entry_id, rhs_debit as debit, rhs_credit as credit, unit_cost AS rate, support_node AS support_id
@@ -176,7 +176,7 @@ pub trait SqlGen: Send + Sync {
         ))
     }
 
-    fn support_entry(&self, section: &str) -> Option<String> {
+    fn fetch_support_entry(&self, section: &str) -> Option<String> {
         Some(format!(
             r#"
             SELECT * FROM {section}_entry
@@ -295,7 +295,7 @@ impl SqlGen for Stakeholder {
             .to_string()
     }
 
-    fn leaf_entry(&self, _section: &str) -> String {
+    fn fetch_leaf_entry(&self, _section: &str) -> String {
         r#"
             SELECT * FROM stakeholder_entry
             WHERE
@@ -330,7 +330,7 @@ impl SqlGen for Stakeholder {
         )
     }
 
-    fn check_action(&self, section: &str) -> String {
+    fn update_is_checked(&self, section: &str) -> String {
         format!(
             r#"
             UPDATE {}_entry
@@ -359,7 +359,7 @@ impl SqlGen for Stakeholder {
         )
     }
 
-    fn collect_leaf_entry(&self, _section: &str) -> Option<String> {
+    fn fetch_leaf_entry_refs(&self, _section: &str) -> Option<String> {
         None
     }
 
@@ -367,7 +367,7 @@ impl SqlGen for Stakeholder {
         None
     }
 
-    fn support_entry(&self, _section: &str) -> Option<String> {
+    fn fetch_support_entry(&self, _section: &str) -> Option<String> {
         None
     }
 
@@ -393,7 +393,7 @@ impl SqlGen for Sale {
     /// The table name is dynamically generated from the `section` parameter.
     ///
     /// Returns a SQL query string used for node selection.
-    fn select_node(&self, section: &str) -> String {
+    fn fetch_tree_applied(&self, section: &str) -> String {
         let now = Utc::now();
         let today_start = now
             .date_naive()
@@ -425,7 +425,7 @@ impl SqlGen for Sale {
             .to_string()
     }
 
-    fn leaf_entry(&self, _section: &str) -> String {
+    fn fetch_leaf_entry(&self, _section: &str) -> String {
         format!(
             r#"
             SELECT * FROM sale_entry
@@ -459,7 +459,7 @@ impl SqlGen for Sale {
         ))
     }
 
-    fn fetch_tree(&self, section: &str) -> Option<String> {
+    fn fetch_tree_acked(&self, section: &str) -> Option<String> {
         Some(format!(
             r#"
             SELECT * FROM {section}_node
@@ -474,7 +474,7 @@ impl SqlGen for Sale {
         ))
     }
 
-    fn update_node_direction_rule(&self, section: &str) -> String {
+    fn update_direction_rule(&self, section: &str) -> String {
         format!(
             r#"
             UPDATE {section}_node
@@ -492,7 +492,7 @@ impl SqlGen for Sale {
         )
     }
 
-    fn collect_leaf_entry(&self, _section: &str) -> Option<String> {
+    fn fetch_leaf_entry_refs(&self, _section: &str) -> Option<String> {
         None
     }
 
@@ -500,7 +500,7 @@ impl SqlGen for Sale {
         None
     }
 
-    fn support_entry(&self, _section: &str) -> Option<String> {
+    fn fetch_support_entry(&self, _section: &str) -> Option<String> {
         None
     }
 
@@ -530,7 +530,7 @@ impl SqlGen for Purchase {
     /// The table name is dynamically generated from the `section` parameter.
     ///
     /// Returns a SQL query string used for node selection.
-    fn select_node(&self, section: &str) -> String {
+    fn fetch_tree_applied(&self, section: &str) -> String {
         let now = Utc::now();
         let today_start = now
             .date_naive()
@@ -562,7 +562,7 @@ impl SqlGen for Purchase {
             .to_string()
     }
 
-    fn leaf_entry(&self, _section: &str) -> String {
+    fn fetch_leaf_entry(&self, _section: &str) -> String {
         format!(
             r#"
             SELECT * FROM purchase_entry
@@ -597,7 +597,7 @@ impl SqlGen for Purchase {
         ))
     }
 
-    fn fetch_tree(&self, section: &str) -> Option<String> {
+    fn fetch_tree_acked(&self, section: &str) -> Option<String> {
         Some(format!(
             r#"
             SELECT * FROM {section}_node
@@ -612,7 +612,7 @@ impl SqlGen for Purchase {
         ))
     }
 
-    fn update_node_direction_rule(&self, section: &str) -> String {
+    fn update_direction_rule(&self, section: &str) -> String {
         format!(
             r#"
             UPDATE {section}_node
@@ -630,7 +630,7 @@ impl SqlGen for Purchase {
         )
     }
 
-    fn collect_leaf_entry(&self, _section: &str) -> Option<String> {
+    fn fetch_leaf_entry_refs(&self, _section: &str) -> Option<String> {
         None
     }
 
@@ -638,7 +638,7 @@ impl SqlGen for Purchase {
         None
     }
 
-    fn support_entry(&self, _section: &str) -> Option<String> {
+    fn fetch_support_entry(&self, _section: &str) -> Option<String> {
         None
     }
 
@@ -671,7 +671,7 @@ impl SqlGen for Item {
 }
 
 impl SqlGen for Finance {
-    fn collect_leaf_entry(&self, section: &str) -> Option<String> {
+    fn fetch_leaf_entry_refs(&self, section: &str) -> Option<String> {
         Some(format!(
             r#"
             SELECT rhs_node AS node_id, id AS entry_id, rhs_debit as debit, rhs_credit as credit, lhs_rate AS rate, support_node AS support_id
@@ -690,7 +690,7 @@ impl SqlGen for Finance {
 }
 
 impl SqlGen for Task {
-    fn select_node(&self, section: &str) -> String {
+    fn fetch_tree_applied(&self, section: &str) -> String {
         let now = Utc::now();
         let start = Utc
             .with_ymd_and_hms(now.year() - 1, 1, 1, 0, 0, 0)
@@ -712,7 +712,7 @@ impl SqlGen for Task {
         )
     }
 
-    fn fetch_tree(&self, section: &str) -> Option<String> {
+    fn fetch_tree_acked(&self, section: &str) -> Option<String> {
         Some(format!(
             r#"
             SELECT * FROM {section}_node
