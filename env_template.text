@@ -4,7 +4,7 @@ RUST_LOG=error,warn,info
 
 BASE_POSTGRES_URL=postgres://localhost:5432
 VAULT_ADDR="http://127.0.0.1:8200"
-LISTEN_ADDR=127.0.0.1:8080
+LISTEN_ADDR=127.0.0.1:7749
 
 # -----------------------------------------
 # Authentication Database

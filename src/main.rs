@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
         var("BASE_POSTGRES_URL").unwrap_or_else(|_| "postgres://localhost:5432".to_string());
     let vault_addr = var("VAULT_ADDR").unwrap_or_else(|_| "http://127.0.0.1:8200".to_string());
     let vault_token = var("VAULT_TOKEN").ok().filter(|t| !t.is_empty());
-    let listen_addr = var("LISTEN_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
+    let listen_addr = var("LISTEN_ADDR").unwrap_or_else(|_| "127.0.0.1:7749".to_string());
 
     let auth_db = read_value_with_default("AUTH_DB", "ytx_auth")?;
     let auth_readwrite_role = read_value_with_default("AUTH_READWRITE_ROLE", "ytx_auth_readwrite")?;
