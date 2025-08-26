@@ -13,17 +13,29 @@ AUTH_DB=ytx_auth                      # Database storing YTX role and workspace 
 # Note: must match the database created by ytx-initdb
 
 # -----------------------------------------
-# PostgreSQL roles (can be customized, must match initdb)
-# -----------------------------------------
-AUTH_READWRITE_ROLE=ytx_auth_readwrite
-MAIN_READWRITE_ROLE=ytx_main_readwrite          # default role assigned when a new user registers
-MAIN_READONLY_ROLE=ytx_main_readonly
-# Note: if customized, must match roles created by ytx-initdb
+# AUTH_DB Roles Password
+YTX_AUTH_READWRITE_PASSWORD=                 # Password for AUTH_DB read/write role
 
 # -----------------------------------------
-# Role passwords (can be overridden by Vault)
-# -----------------------------------------
-AUTH_READWRITE_PASSWORD=                         # Password for AUTH_READWRITE_ROLE (used if Vault token is empty)
-MAIN_READWRITE_PASSWORD=                         # Password for MAIN_READONLY_ROLE (used if Vault token is empty)
-MAIN_READONLY_PASSWORD=                          # Password for MAIN_READWRITE_ROLE (used if Vault token is empty)
+# MAIN_DB Roles Password
+YTX_MAIN_READWRITE_PASSWORD=                # Global read/write role for MAIN_DB
+YTX_MAIN_READONLY_PASSWORD=                 # Global read-only role for MAIN_DB
+
+YTX_MAIN_FINANCE_READWRITE_PASSWORD=        # Read/write role for FINANCE section
+YTX_MAIN_FINANCE_READONLY_PASSWORD=         # Read-only role for FINANCE section
+
+YTX_MAIN_STAKEHOLDER_READWRITE_PASSWORD=    # Read/write role for STAKEHOLDER section
+YTX_MAIN_STAKEHOLDER_READONLY_PASSWORD=     # Read-only role for STAKEHOLDER section
+
+YTX_MAIN_ITEM_READWRITE_PASSWORD=           # Read/write role for ITEM section
+YTX_MAIN_ITEM_READONLY_PASSWORD=            # Read-only role for ITEM section
+
+YTX_MAIN_TASK_READWRITE_PASSWORD=           # Read/write role for TASK section
+YTX_MAIN_TASK_READONLY_PASSWORD=            # Read-only role for TASK section
+
+YTX_MAIN_SALE_READWRITE_PASSWORD=           # Read/write role for SALE section
+YTX_MAIN_SALE_READONLY_PASSWORD=            # Read-only role for SALE section
+
+YTX_MAIN_PURCHASE_READWRITE_PASSWORD=       # Read/write role for PURCHASE section
+YTX_MAIN_PURCHASE_READONLY_PASSWORD=        # Read-only role
 # Note: Vault passwords override these values if token is provided

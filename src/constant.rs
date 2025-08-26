@@ -44,3 +44,5 @@ pub const ENTRY_ID: &str = "entry_id";
 pub const SUPPORT_ID: &str = "support_id";
 
 pub const YTX_SECRET_PATH: &str = "secret/data/postgres/ytx";
+pub const AUTH_READWRITE_ROLE: &str = "ytx_auth_readwrite";
+pub const MAIN_ITEM_READONLY_ROLE: &str = "ytx_main_item_readonly";

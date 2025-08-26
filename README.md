@@ -41,8 +41,28 @@ YTX Server is a Rust-based backend server that provides WebSocket communication,
         VAULT_TOKEN=your-vault-token
         LISTEN_ADDR=127.0.0.1:8080
         AUTH_DB=ytx_auth
-        AUTH_READWRITE_ROLE=ytx_auth_readwrite
-        AUTH_READWRITE_PASSWORD=your-password
+
+        YTX_AUTH_READWRITE_PASSWORD=                # Global read/write role for AUTH_DB
+        YTX_MAIN_READWRITE_PASSWORD=                # Global read/write role for MAIN_DB
+        YTX_MAIN_READONLY_PASSWORD=                 # Global read-only role for MAIN_DB
+
+        YTX_MAIN_FINANCE_READWRITE_PASSWORD=        # Read/write role for FINANCE section
+        YTX_MAIN_FINANCE_READONLY_PASSWORD=         # Read-only role for FINANCE section
+
+        YTX_MAIN_STAKEHOLDER_READWRITE_PASSWORD=    # Read/write role for STAKEHOLDER section
+        YTX_MAIN_STAKEHOLDER_READONLY_PASSWORD=     # Read-only role for STAKEHOLDER section
+
+        YTX_MAIN_ITEM_READWRITE_PASSWORD=           # Read/write role for ITEM section
+        YTX_MAIN_ITEM_READONLY_PASSWORD=            # Read-only role for ITEM section
+
+        YTX_MAIN_TASK_READWRITE_PASSWORD=           # Read/write role for TASK section
+        YTX_MAIN_TASK_READONLY_PASSWORD=            # Read-only role for TASK section
+
+        YTX_MAIN_SALE_READWRITE_PASSWORD=           # Read/write role for SALE section
+        YTX_MAIN_SALE_READONLY_PASSWORD=            # Read-only role for SALE section
+
+        YTX_MAIN_PURCHASE_READWRITE_PASSWORD=       # Read/write role for PURCHASE section
+        YTX_MAIN_PURCHASE_READONLY_PASSWORD=        # Read-only role
         ```
 
 3. **Build the project:**

@@ -1,13 +1,11 @@
 use crate::constant::*;
 use crate::dbhub::*;
 use crate::message::*;
-use crate::read_value_with_default;
 use crate::websocket::websocket::*;
 
 use anyhow::{Context, Result, anyhow};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use chrono::{DateTime, Utc};
-use dotenvy::dotenv;
 use futures::future::join_all;
 use futures_util::{
     SinkExt, StreamExt,
@@ -405,10 +403,6 @@ impl Session {
     async fn apply_workspace_access(&self, user_id: Uuid, workspace: &str) -> Result<()> {
         let auth_pool = &self.dbhub.auth_pool;
 
-        dotenv().ok();
-        let readonly_role =
-            read_value_with_default("MAIN_READWRITE_ROLE", "ytx_main_item_readonly")?;
-
         sqlx::query(
             r#"
             INSERT INTO ytx_role_workspace (user_id, workspace, role, is_access_enabled, register_time)
@@ -418,7 +412,7 @@ impl Session {
         )
         .bind(user_id)
         .bind(workspace)
-        .bind(&readonly_role)
+        .bind(MAIN_ITEM_READONLY_ROLE)
         .execute(auth_pool)
         .await?;
 

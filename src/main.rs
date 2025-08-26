@@ -4,6 +4,7 @@ mod message;
 mod utils;
 mod websocket;
 
+use crate::constant::AUTH_READWRITE_ROLE;
 use crate::constant::YTX_SECRET_PATH;
 use crate::dbhub::*;
 use crate::utils::*;
@@ -34,9 +35,8 @@ async fn main() -> Result<()> {
     let listen_addr = var("LISTEN_ADDR").unwrap_or_else(|_| "127.0.0.1:7749".to_string());
 
     let auth_db = read_value_with_default("AUTH_DB", "ytx_auth")?;
-    let auth_readwrite_role = read_value_with_default("AUTH_READWRITE_ROLE", "ytx_auth_readwrite")?;
 
-    let mut auth_readwrite_password = var("AUTH_READWRITE_PASSWORD").unwrap_or_default();
+    let mut auth_readwrite_password = var("YTX_AUTH_READWRITE_PASSWORD").unwrap_or_default();
 
     if let Some(token) = &vault_token {
         let vault_addr_clone = vault_addr.clone();
@@ -50,12 +50,12 @@ async fn main() -> Result<()> {
             .await
             .context("Failed to read YTX role passwords from Vault")?;
 
-        auth_readwrite_password = get_vault_password(&ytx_data, &auth_readwrite_role)?;
+        auth_readwrite_password = get_vault_password(&ytx_data, AUTH_READWRITE_ROLE)?;
     }
 
     let auth_url = build_url(
         &base_postgres_url,
-        &auth_readwrite_role,
+        AUTH_READWRITE_ROLE,
         &auth_readwrite_password,
         &auth_db,
     )?;
