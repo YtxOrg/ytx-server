@@ -406,7 +406,8 @@ impl Session {
         let auth_pool = &self.dbhub.auth_pool;
 
         dotenv().ok();
-        let readwrite_role = read_value_with_default("MAIN_READWRITE_ROLE", "ytx_main_readwrite")?;
+        let readonly_role =
+            read_value_with_default("MAIN_READWRITE_ROLE", "ytx_main_item_readonly")?;
 
         sqlx::query(
             r#"
@@ -417,7 +418,7 @@ impl Session {
         )
         .bind(user_id)
         .bind(workspace)
-        .bind(&readwrite_role)
+        .bind(&readonly_role)
         .execute(auth_pool)
         .await?;
 
