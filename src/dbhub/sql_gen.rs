@@ -668,6 +668,23 @@ impl SqlGen for Item {
             .to_string(),
         )
     }
+
+    fn fetch_leaf_entry_refs(&self, section: &str) -> Option<String> {
+        Some(format!(
+            r#"
+        SELECT rhs_node AS node_id, id AS entry_id, rhs_debit as debit, rhs_credit as credit, unit_cost AS rate, NULL AS support_id
+        FROM {0}_entry
+        WHERE lhs_node = $1 AND is_valid = TRUE
+
+        UNION ALL
+
+        SELECT lhs_node AS node_id, id AS entry_id, lhs_debit as debit, lhs_credit as credit, unit_cost AS rate, NULL AS support_id
+        FROM {0}_entry
+        WHERE rhs_node = $1 AND is_valid = TRUE
+        "#,
+            section
+        ))
+    }
 }
 
 impl SqlGen for Finance {
