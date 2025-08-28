@@ -144,21 +144,8 @@ pub trait SqlGen: Send + Sync {
     ///
     /// Parameters:
     /// - `$1`: The leaf node ID to be removed.
-    fn fetch_leaf_entry_refs(&self, section: &str) -> Option<String> {
-        Some(format!(
-            r#"
-        SELECT rhs_node AS node_id, id AS entry_id, rhs_debit as debit, rhs_credit as credit, unit_cost AS rate, support_node AS support_id
-        FROM {0}_entry
-        WHERE lhs_node = $1 AND is_valid = TRUE
-
-        UNION ALL
-
-        SELECT lhs_node AS node_id, id AS entry_id, lhs_debit as debit, lhs_credit as credit, unit_cost AS rate, support_node AS support_id
-        FROM {0}_entry
-        WHERE rhs_node = $1 AND is_valid = TRUE
-        "#,
-            section
-        ))
+    fn fetch_leaf_entry_refs(&self, _section: &str) -> Option<String> {
+        None
     }
 
     /// Returns the SQL used to check whether a node is referenced as a support node
@@ -359,10 +346,6 @@ impl SqlGen for Stakeholder {
         )
     }
 
-    fn fetch_leaf_entry_refs(&self, _section: &str) -> Option<String> {
-        None
-    }
-
     fn has_support_reference(&self, _section: &str) -> Option<String> {
         None
     }
@@ -490,10 +473,6 @@ impl SqlGen for Sale {
             WHERE id = $3 AND is_valid = TRUE
             "#,
         )
-    }
-
-    fn fetch_leaf_entry_refs(&self, _section: &str) -> Option<String> {
-        None
     }
 
     fn has_support_reference(&self, _section: &str) -> Option<String> {
@@ -630,10 +609,6 @@ impl SqlGen for Purchase {
         )
     }
 
-    fn fetch_leaf_entry_refs(&self, _section: &str) -> Option<String> {
-        None
-    }
-
     fn has_support_reference(&self, _section: &str) -> Option<String> {
         None
     }
@@ -737,6 +712,23 @@ impl SqlGen for Task {
             SELECT * FROM {section}_node
             WHERE issued_time >= $1 AND issued_time < $2 AND is_valid = TRUE AND kind != 0
             "#,
+        ))
+    }
+
+    fn fetch_leaf_entry_refs(&self, section: &str) -> Option<String> {
+        Some(format!(
+            r#"
+        SELECT rhs_node AS node_id, id AS entry_id, rhs_debit as debit, rhs_credit as credit, unit_cost AS rate, support_node AS support_id
+        FROM {0}_entry
+        WHERE lhs_node = $1 AND is_valid = TRUE
+
+        UNION ALL
+
+        SELECT lhs_node AS node_id, id AS entry_id, lhs_debit as debit, lhs_credit as credit, unit_cost AS rate, support_node AS support_id
+        FROM {0}_entry
+        WHERE rhs_node = $1 AND is_valid = TRUE
+        "#,
+            section
         ))
     }
 }
