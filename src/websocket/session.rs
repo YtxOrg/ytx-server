@@ -156,13 +156,10 @@ impl Session {
             // Node removal and replacement
             MsgType::LeafRemove => self.remove_leaf(&msg).await?,
             MsgType::BranchRemove => self.remove_branch(&msg).await?,
-            MsgType::SupportRemove => self.remove_support(&msg).await?,
             MsgType::LeafReplace => self.replace_leaf(&msg).await?,
-            MsgType::SupportReplace => self.replace_support(&msg).await?,
 
             // Node reference pre-checks before removal
             MsgType::LeafReference => self.check_and_remove_leaf(&msg).await?,
-            MsgType::SupportReference => self.check_and_remove_support(&msg).await?,
 
             // Entry operations
             MsgType::EntryInsert => self.insert_entry(&msg).await?,
@@ -179,9 +176,10 @@ impl Session {
             MsgType::DefaultUnit => self.update_default_unit(&msg).await?,
             MsgType::DocumentDir => self.update_document_dir(&msg).await?,
 
-            MsgType::TableAcked => self.push_table_acked(&msg).await?,
-            MsgType::TreeAcked => self.push_tree_acked(&msg).await?,
-            MsgType::OneNode => self.push_one_node(&msg).await?,
+            MsgType::TreeAcked => self.tree_acked(&msg).await?,
+            MsgType::LeafAcked => self.leaf_acked(&msg).await?,
+            MsgType::SupportAcked => self.support_acked(&msg).await?,
+            MsgType::OneNode => self.one_node(&msg).await?,
 
             // Action check
             MsgType::CheckAction => self.check_action(&msg).await?,
@@ -389,7 +387,7 @@ impl Session {
         )
         .await?;
 
-        self.push_tree_applied(pool.clone()).await?;
+        self.tree_applied(pool.clone()).await?;
         info!("Push tree data successfully.");
 
         self.pgpool = Some(pool);
@@ -419,7 +417,7 @@ impl Session {
         Ok(())
     }
 
-    async fn push_tree_applied(&self, pool: PgPool) -> Result<()> {
+    async fn tree_applied(&self, pool: PgPool) -> Result<()> {
         let writer = self.ws_writer.clone();
 
         let tasks = SECTIONS.iter().map(|section| {
@@ -469,7 +467,7 @@ impl Session {
 
         for result in results {
             if let Err(e) = result {
-                error!("Error fetching tree data: {}", e);
+                error!("Error fetching tree applied: {}", e);
             }
         }
 
@@ -640,14 +638,14 @@ impl Session {
 }
 
 impl Session {
-    async fn push_tree_acked(&self, msg: &Msg) -> Result<()> {
+    async fn tree_acked(&self, msg: &Msg) -> Result<()> {
         let pool = self
             .pgpool
             .as_ref()
             .ok_or(anyhow!("pgpool not initialized"))?;
 
         let value: TreeAcked =
-            from_value(msg.value.clone()).with_context(|| "Failed to parse NodeData")?;
+            from_value(msg.value.clone()).with_context(|| "Failed to parse TreeAcked")?;
 
         let section = &value.section;
 
@@ -662,7 +660,7 @@ impl Session {
         let sql_gen = self
             .sql_factory
             .get(&section)
-            .ok_or_else(|| anyhow!("No SqlGen implementation found for section: '{}'", section))?;
+            .expect("SqlGen must exist after validate_section");
 
         let sql = sql_gen
             .fetch_tree_acked(section)
@@ -712,7 +710,7 @@ impl Session {
         Ok(())
     }
 
-    async fn push_one_node(&self, msg: &Msg) -> Result<()> {
+    async fn one_node(&self, msg: &Msg) -> Result<()> {
         let pool = self
             .pgpool
             .as_ref()
@@ -833,11 +831,12 @@ impl Session {
 
         value.session_id = self.session_id.to_string();
         let section = &value.section;
+        validate_section(section)?;
 
         let sql_gen = self
             .sql_factory
             .get(section)
-            .ok_or_else(|| anyhow!("No SqlGen found for section: {}", section))?;
+            .expect("SqlGen must exist after validate_section");
 
         let sql: String = sql_gen.update_direction_rule(section);
 
@@ -924,7 +923,7 @@ impl Session {
         let sql_gen = self
             .sql_factory
             .get(section)
-            .ok_or_else(|| anyhow!("No SqlGen found for section: {}", section))?;
+            .expect("SqlGen must exist after validate_section");
 
         let mut delta_hash: HashMap<Uuid, (Decimal, Decimal)> = HashMap::new();
 
@@ -1028,51 +1027,6 @@ impl Session {
         Ok(())
     }
 
-    async fn check_and_remove_support(&self, msg: &Msg) -> Result<()> {
-        let (user_id, pool, sender) = self.resolve_context()?;
-
-        let value: SupportReference =
-            from_value(msg.value.clone()).with_context(|| "Failed to parse SupportReference")?;
-
-        let section = &value.section;
-        validate_section(section)?;
-
-        let id = value.id;
-
-        let now = Utc::now();
-
-        let sql_gen = self
-            .sql_factory
-            .get(section)
-            .ok_or_else(|| anyhow!("No SqlGen found for section: {}", section))?;
-
-        let support_reference = has_support_reference(section, id, sql_gen, pool).await?;
-
-        if !support_reference {
-            let mut tx = pool.begin().await?;
-
-            info!("Removing node...");
-            remove_node(&section, id, user_id, now, sql_gen, &mut tx).await?;
-
-            info!("Deleting path...");
-            delete_descendant_path(&section, id, &mut tx).await?;
-
-            tx.commit().await?;
-
-            broadcast_public_message(
-                sender.clone(),
-                MsgType::UnreferencedNodeRemove,
-                json!(value),
-            )
-            .await?;
-        } else {
-            send_private_message(self.ws_writer.clone(), msg.msg_type.clone(), json!(value))
-                .await?;
-        }
-
-        Ok(())
-    }
-
     async fn check_and_remove_leaf(&self, msg: &Msg) -> Result<()> {
         let (user_id, pool, sender) = self.resolve_context()?;
 
@@ -1088,12 +1042,12 @@ impl Session {
         let sql_gen = self
             .sql_factory
             .get(section)
-            .ok_or_else(|| anyhow!("No SqlGen found for section: {}", section))?;
+            .expect("SqlGen must exist after validate_section");
 
-        value.leaf_reference = has_leaf_reference(section, id, sql_gen, pool).await?;
+        value.internal_reference = has_leaf_reference(section, id, sql_gen, pool).await?;
         value.external_reference = has_external_reference(id, sql_gen, pool).await?;
 
-        if !value.leaf_reference && !value.external_reference {
+        if !value.internal_reference && !value.external_reference {
             let mut tx = pool.begin().await?;
 
             info!("Removing node...");
@@ -1134,7 +1088,7 @@ impl Session {
         let sql_gen = self
             .sql_factory
             .get(section)
-            .ok_or_else(|| anyhow!("No SqlGen found for section: {}", section))?;
+            .expect("SqlGen must exist after validate_section");
 
         let now = Utc::now();
 
@@ -1147,87 +1101,6 @@ impl Session {
         delete_ancestor_path(&section, id, &mut tx).await?;
 
         tx.commit().await?;
-        broadcast_public_message(sender.clone(), msg.msg_type.clone(), json!(value)).await?;
-
-        Ok(())
-    }
-
-    async fn remove_support(&self, msg: &Msg) -> Result<()> {
-        let (user_id, pool, sender) = self.resolve_context()?;
-
-        let mut value: SupportRemove =
-            from_value(msg.value.clone()).with_context(|| "Failed to parse SupportRemove")?;
-
-        value.session_id = self.session_id.to_string();
-
-        let section = &value.section;
-        validate_section(section)?;
-
-        let id = value.id;
-
-        let sql_gen = self
-            .sql_factory
-            .get(section)
-            .ok_or_else(|| anyhow!("No SqlGen found for section: {}", section))?;
-
-        let now = Utc::now();
-
-        let mut tx = pool.begin().await?;
-
-        info!("Removing support node...");
-        remove_node(&section, id, user_id, now, sql_gen, &mut tx).await?;
-
-        info!("Removing support entry...");
-        remove_support_reference(&section, id, user_id, now, sql_gen, &mut tx).await?;
-
-        info!("Deleting path...");
-        delete_descendant_path(&section, id, &mut tx).await?;
-
-        info!("Committing transaction...");
-        tx.commit().await?;
-
-        info!("Sending public message...");
-        broadcast_public_message(sender.clone(), msg.msg_type.clone(), json!(value)).await?;
-
-        Ok(())
-    }
-
-    async fn replace_support(&self, msg: &Msg) -> Result<()> {
-        let (user_id, pool, sender) = self.resolve_context()?;
-
-        let mut value: SupportReplace =
-            from_value(msg.value.clone()).with_context(|| "Failed to parse SupportReplace")?;
-
-        let section = &value.section;
-        validate_section(section)?;
-
-        let old_id = value.old_id;
-        let new_id = value.new_id;
-
-        info!("Section: {}", section);
-
-        let now = Utc::now();
-        value.session_id = self.session_id.to_string();
-
-        let sql_gen = self
-            .sql_factory
-            .get(section)
-            .ok_or_else(|| anyhow!("No SqlGen found for section: {}", section))?;
-
-        let mut tx = pool.begin().await?;
-
-        info!("Removing support node...");
-        remove_node(&section, old_id, user_id, now, sql_gen, &mut tx).await?;
-
-        info!("Replacing support entry...");
-        replace_support_reference(&section, old_id, new_id, user_id, now, &mut tx).await?;
-
-        info!("Deleting path...");
-        delete_descendant_path(&section, old_id, &mut tx).await?;
-
-        info!("Committing transaction...");
-        tx.commit().await?;
-
         broadcast_public_message(sender.clone(), msg.msg_type.clone(), json!(value)).await?;
 
         Ok(())
@@ -1256,7 +1129,7 @@ impl Session {
         let sql_gen = self
             .sql_factory
             .get(section)
-            .ok_or_else(|| anyhow!("No SqlGen implementation found for section: '{}'", section))?;
+            .expect("SqlGen must exist after validate_section");
 
         if let Some(sql) = sql_gen.has_replace_conflict(section) {
             let conflict_exists: bool = sqlx::query_scalar(&sql)
@@ -1332,32 +1205,66 @@ impl Session {
 }
 
 impl Session {
-    async fn push_table_acked(&self, msg: &Msg) -> Result<()> {
+    async fn leaf_acked(&self, msg: &Msg) -> Result<()> {
         let pool = self
             .pgpool
             .as_ref()
             .ok_or(anyhow!("pgpool not initialized"))?;
 
-        let mut value: TableAcked =
-            from_value(msg.value.clone()).with_context(|| "Failed to parse EntryData")?;
+        let mut value: LeafAcked =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse LeafAcked")?;
 
         let section = &value.section;
         validate_section(section)?;
 
         let node_id = value.node_id;
-        let kind = value.kind;
 
         let sql_gen = self
             .sql_factory
             .get(section)
-            .ok_or_else(|| anyhow!("No SqlGen found for section: {}", section))?;
+            .expect("SqlGen must exist after validate_section");
 
-        let sql = match kind {
-            LEAF_NODE => Some(sql_gen.fetch_leaf_entry(section)),
-            SUPPORT_NODE => sql_gen.fetch_support_entry(section),
-            _ => None,
+        let sql =
+            Some(sql_gen.fetch_leaf_entry(section)).ok_or_else(|| anyhow!("No SQL statement"))?;
+
+        let rows = sqlx::query(&sql).bind(node_id).fetch_all(pool).await?;
+
+        if rows.is_empty() {
+            info!(
+                "No entry rows found for section '{}' and id {}",
+                section, node_id
+            );
+            return Ok(());
         }
-        .ok_or_else(|| anyhow!("No SQL statement for kind: {}", kind))?;
+
+        value.entry_array = pg_to_json_rows(&rows)?;
+        send_private_message(self.ws_writer.clone(), msg.msg_type.clone(), json!(value)).await?;
+
+        Ok(())
+    }
+
+    async fn support_acked(&self, msg: &Msg) -> Result<()> {
+        let pool = self
+            .pgpool
+            .as_ref()
+            .ok_or(anyhow!("pgpool not initialized"))?;
+
+        let mut value: SupportAcked =
+            from_value(msg.value.clone()).with_context(|| "Failed to parse SupportAcked")?;
+
+        let section = &value.section;
+        validate_section(section)?;
+
+        let node_id = value.node_id;
+
+        let sql_gen = self
+            .sql_factory
+            .get(section)
+            .expect("SqlGen must exist after validate_section");
+
+        let sql = sql_gen
+            .fetch_support_entry(section)
+            .ok_or_else(|| anyhow!("No SQL statement"))?;
 
         let rows = sqlx::query(&sql).bind(node_id).fetch_all(pool).await?;
 
@@ -1701,7 +1608,7 @@ impl Session {
         let sql_gen = self
             .sql_factory
             .get(&section)
-            .ok_or_else(|| anyhow!("No SqlGen for section: {}", section))?;
+            .expect("SqlGen must exist after validate_section");
 
         let sql = sql_gen.update_is_checked(&section);
 

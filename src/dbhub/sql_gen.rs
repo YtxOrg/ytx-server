@@ -151,50 +151,33 @@ pub trait SqlGen: Send + Sync {
     /// Returns the SQL used to check whether a node is referenced as a support node
     /// (`support_node`) in any valid entry.
     ///
-    /// Although all node tables define a `kind` field, only the `finance`, `item`,
-    /// and `task` sections include the `support` kind.
-    ///
-    /// Other sections (e.g., `sale`, `purchase`, `stakeholder`) do not include the
-    /// `support` kind and do not need this check.
-    fn has_support_reference(&self, section: &str) -> Option<String> {
-        Some(format!(
-            "SELECT EXISTS(SELECT 1 FROM {}_entry WHERE support_node = $1 AND is_valid = TRUE)",
-            section
-        ))
+    /// Only `stakeholder` nodes can be referenced as support nodes by `task` entries.
+    /// Other sections (e.g., `sale`, `purchase`, `item`) never appear as support nodes
+    /// and therefore do not need this check.
+    fn has_support_reference(&self, _section: &str) -> Option<String> {
+        None
     }
 
-    fn fetch_support_entry(&self, section: &str) -> Option<String> {
-        Some(format!(
-            r#"
-            SELECT * FROM {section}_entry
-            WHERE support_node = $1 AND is_valid = TRUE
-            "#,
-        ))
+    /// Returns the SQL used to fetch entries where the given node is referenced
+    /// as a support node.
+    ///
+    /// This only applies to `stakeholder` nodes being referenced by `task` entries.
+    fn fetch_support_entry(&self, _section: &str) -> Option<String> {
+        None
     }
 
     /// Returns SQL to clear `support_node` references from entries involving a given node.
     ///
-    /// This only applies to sections (`finance`, `item`, `task`) that define a `support_node`
-    /// column in their entry tables. Other sections do not need to implement this behavior.
+    /// This only applies to the `task` section, whose entry table includes a `support_node`
+    /// column that references `stakeholder` nodes. Other sections do not need to implement
+    /// this behavior.
     ///
     /// Parameters:
     ///   $1 - updated_time (e.g., NOW())
     ///   $2 - updated_by (user_id)
-    ///   $3 - support_node (the node to disassociate)
-    fn remove_support_reference(&self, section: &str) -> Option<String> {
-        Some(format!(
-            r#"
-            UPDATE {}_entry
-            SET
-                support_node = NULL,
-                updated_time = $2,
-                updated_by = $1
-            WHERE
-                support_node = $3
-                AND is_valid = TRUE
-            "#,
-            section
-        ))
+    ///   $3 - support_node (the stakeholder node to disassociate)
+    fn remove_support_reference(&self, _section: &str) -> Option<String> {
+        None
     }
 
     /// Returns a SQL query to check whether the given node is externally referenced
@@ -347,15 +330,33 @@ impl SqlGen for Stakeholder {
     }
 
     fn has_support_reference(&self, _section: &str) -> Option<String> {
-        None
+        Some(format!(
+            "SELECT EXISTS(SELECT 1 FROM task_entry WHERE support_node = $1 AND is_valid = TRUE)"
+        ))
     }
 
     fn fetch_support_entry(&self, _section: &str) -> Option<String> {
-        None
+        Some(format!(
+            r#"
+            SELECT * FROM task_entry
+            WHERE support_node = $1 AND is_valid = TRUE
+            "#,
+        ))
     }
 
     fn remove_support_reference(&self, _section: &str) -> Option<String> {
-        None
+        Some(format!(
+            r#"
+            UPDATE task_entry
+            SET
+                support_node = NULL,
+                updated_time = $2,
+                updated_by = $1
+            WHERE
+                support_node = $3
+                AND is_valid = TRUE
+            "#
+        ))
     }
 
     fn merge_node_total(&self, _section: &str) -> Option<String> {
@@ -475,18 +476,6 @@ impl SqlGen for Sale {
         )
     }
 
-    fn has_support_reference(&self, _section: &str) -> Option<String> {
-        None
-    }
-
-    fn fetch_support_entry(&self, _section: &str) -> Option<String> {
-        None
-    }
-
-    fn remove_support_reference(&self, _section: &str) -> Option<String> {
-        None
-    }
-
     fn replace_leaf_entry(&self, _section: &str) -> Option<String> {
         None
     }
@@ -545,8 +534,7 @@ impl SqlGen for Purchase {
         format!(
             r#"
             SELECT * FROM purchase_entry
-            WHERE
-                lhs_node = $1 AND is_valid = TRUE
+            WHERE lhs_node = $1 AND is_valid = TRUE
             "#,
         )
     }
@@ -607,18 +595,6 @@ impl SqlGen for Purchase {
             WHERE id = $3 AND is_valid = TRUE
             "#,
         )
-    }
-
-    fn has_support_reference(&self, _section: &str) -> Option<String> {
-        None
-    }
-
-    fn fetch_support_entry(&self, _section: &str) -> Option<String> {
-        None
-    }
-
-    fn remove_support_reference(&self, _section: &str) -> Option<String> {
-        None
     }
 
     fn replace_leaf_entry(&self, _section: &str) -> Option<String> {

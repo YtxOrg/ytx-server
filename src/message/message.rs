@@ -36,15 +36,14 @@ pub enum MsgType {
     LeafRemove,
     BranchRemove,
     DirectionRule,
-    SupportRemove,
-    SupportReplace,
     LeafReplace,
     EntryRemove,
     TreeApplied,
     SessionId,
     GlobalConfig,
     TreeAcked,
-    TableAcked,
+    LeafAcked,
+    SupportAcked,
     CheckAction,
     DocumentDir,
     DefaultUnit,
@@ -52,7 +51,6 @@ pub enum MsgType {
     EntryRate,
     EntryNumeric, // debit or credit
     UpdateDefaultUnitFailed,
-    SupportReference,
     LeafReference,
     UnreferencedNodeRemove,
     Other,
@@ -66,10 +64,17 @@ message_struct! {
 }
 
 message_struct! {
-    pub struct TableAcked {
+    pub struct LeafAcked {
         pub section: String,
         pub node_id : Uuid,
-        pub kind: i32,
+        pub entry_array : Value,
+    }
+}
+
+message_struct! {
+    pub struct SupportAcked {
+        pub section: String,
+        pub node_id : Uuid,
         pub entry_array : Value,
     }
 }
@@ -176,13 +181,6 @@ message_struct! {
 }
 
 message_struct! {
-    pub struct SupportReference {
-        pub section: String,
-        pub id : Uuid,
-    }
-}
-
-message_struct! {
     pub struct TreeAcked {
         pub section: String,
         pub start: DateTime<Utc>,
@@ -203,7 +201,7 @@ message_struct! {
     pub struct LeafReference {
         pub section: String,
         pub id : Uuid,
-        pub leaf_reference: bool,
+        pub internal_reference: bool,
         pub external_reference: bool,
     }
 }
@@ -275,23 +273,6 @@ message_struct! {
         pub section: String,
         pub session_id : String,
         pub id: Uuid,
-    }
-}
-
-message_struct! {
-    pub struct SupportRemove {
-        pub section: String,
-        pub session_id : String,
-        pub id: Uuid,
-    }
-}
-
-message_struct! {
-    pub struct SupportReplace {
-        pub section: String,
-        pub session_id : String,
-        pub old_id: Uuid,
-        pub new_id: Uuid,
     }
 }
 
